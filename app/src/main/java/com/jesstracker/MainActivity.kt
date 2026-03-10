@@ -11,6 +11,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
 import android.widget.Button
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -18,6 +19,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.jesstracker.camera.CameraManager
 import com.jesstracker.tracking.SubjectTracker
+import com.jesstracker.tracking.TrackerState
 import com.jesstracker.ui.TrackingOverlay
 
 /**
@@ -38,6 +40,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var touchOverlay: View
     private lateinit var trackingOverlay: TrackingOverlay
+    private lateinit var txtHint: TextView
 
     // --- Core modules ---
 
@@ -48,6 +51,12 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile private var latestDetections: List<RectF> = emptyList()
     @Volatile private var latestFrame: Bitmap? = null
+
+    // --- Double-tap para deseleccionar ---
+    private var lastTapTimeMs: Long = 0L
+    private companion object {
+        const val DOUBLE_TAP_THRESHOLD_MS = 350L
+    }
 
     // --- Permisos ---
 
@@ -73,6 +82,7 @@ class MainActivity : AppCompatActivity() {
         previewView = findViewById(R.id.previewView)
         touchOverlay = findViewById(R.id.touchOverlay)
         trackingOverlay = findViewById(R.id.trackingOverlay)
+        txtHint = findViewById(R.id.txtHint)
 
         setupTouchListener()
         setupRecordButton()
@@ -122,7 +132,10 @@ class MainActivity : AppCompatActivity() {
                 val cropBox = tracker.update(detections, frame)
 
                 runOnUiThread {
+                    val conf = tracker.identity?.confidence ?: 0f
+                    trackingOverlay.updateStatusInfo(conf, detections.size)
                     trackingOverlay.update(tracker.state, cropBox)
+                    updateHintVisibility(tracker.state)
                     cameraManager.updateAutoFraming(
                         state = tracker.state,
                         trackedBox = cropBox,
@@ -135,17 +148,33 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun updateHintVisibility(state: TrackerState) {
+        txtHint.visibility = if (state == TrackerState.IDLE) View.VISIBLE else View.GONE
+    }
+
     @Suppress("ClickableViewAccessibility")
     private fun setupTouchListener() {
         touchOverlay.setOnTouchListener { v, event ->
             if (event.action != MotionEvent.ACTION_DOWN) return@setOnTouchListener false
 
+            val now = System.currentTimeMillis()
             val screenX = event.x
             val screenY = event.y
-            val normalizedX = screenX / v.width.toFloat()
-            val normalizedY = screenY / v.height.toFloat()
 
             trackingOverlay.showTapFeedback(screenX, screenY)
+
+            // Double-tap para deseleccionar: si esta trackeando y toca dos veces rapido, reset.
+            if (tracker.state != TrackerState.IDLE && now - lastTapTimeMs < DOUBLE_TAP_THRESHOLD_MS) {
+                tracker.reset()
+                trackingOverlay.update(tracker.state, null)
+                updateHintVisibility(tracker.state)
+                lastTapTimeMs = 0L
+                return@setOnTouchListener true
+            }
+            lastTapTimeMs = now
+
+            val normalizedX = screenX / v.width.toFloat()
+            val normalizedY = screenY / v.height.toFloat()
 
             val frame = latestFrame
             val detections = latestDetections
@@ -153,6 +182,7 @@ class MainActivity : AppCompatActivity() {
                 tracker.onTap(PointF(normalizedX, normalizedY), detections, frame)
                 val cropBox = tracker.cropBox
                 trackingOverlay.update(tracker.state, cropBox)
+                updateHintVisibility(tracker.state)
                 cameraManager.updateAutoFraming(
                     state = tracker.state,
                     trackedBox = cropBox,
@@ -183,7 +213,7 @@ class MainActivity : AppCompatActivity() {
                     onRecordingSaved = { uri ->
                         runOnUiThread {
                             btnRecord.text = "\u25CF REC"
-                            Toast.makeText(this, "Video guardado en galería: $uri", Toast.LENGTH_LONG).show()
+                            Toast.makeText(this, "Video guardado en galeria: $uri", Toast.LENGTH_LONG).show()
                         }
                     },
                     onRecordingError = { error ->

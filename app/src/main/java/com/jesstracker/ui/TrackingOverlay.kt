@@ -13,6 +13,9 @@ import com.jesstracker.tracking.TrackerState
 
 /**
  * TrackingOverlay — dibuja sobre el preview el estado visual del tracker.
+ *
+ * Incluye indicador de estado en la esquina superior izquierda para que
+ * el usuario vea a simple vista si el tracker esta activo, buscando, o inactivo.
  */
 class TrackingOverlay @JvmOverloads constructor(
     context: Context,
@@ -25,6 +28,12 @@ class TrackingOverlay @JvmOverloads constructor(
         private const val LANDSCAPE_FRAME_GUIDE_ASPECT = 16f / 9f
         private const val FRAME_SMOOTHING = 0.28f
         private const val LEAD_FACTOR = 0.35f
+
+        private const val STATUS_PADDING = 16f
+        private const val STATUS_PILL_RADIUS = 12f
+        private const val STATUS_DOT_RADIUS = 6f
+        private const val STATUS_TEXT_SIZE = 28f
+        private const val STATUS_MARGIN_TOP = 80f
     }
 
     // --- Estado ---
@@ -34,6 +43,8 @@ class TrackingOverlay @JvmOverloads constructor(
     private var frameGuideRect: RectF? = null
     private var lastCenterX: Float? = null
     private var lastCenterY: Float? = null
+    private var confidence: Float = 0f
+    private var detectionCount: Int = 0
 
     private var tapX: Float = 0f
     private var tapY: Float = 0f
@@ -86,6 +97,22 @@ class TrackingOverlay @JvmOverloads constructor(
         pathEffect = DashPathEffect(floatArrayOf(4f, 4f), 0f)
     }
 
+    private val statusBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#99000000")
+        style = Paint.Style.FILL
+    }
+
+    private val statusDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
+    private val statusTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = STATUS_TEXT_SIZE
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        setShadowLayer(2f, 0f, 1f, Color.BLACK)
+    }
+
     fun update(state: TrackerState, cropBox: RectF?) {
         trackerState = state
         subjectBox = cropBox?.let { denormalize(it) }
@@ -101,6 +128,11 @@ class TrackingOverlay @JvmOverloads constructor(
         invalidate()
     }
 
+    fun updateStatusInfo(confidence: Float, detectionCount: Int) {
+        this.confidence = confidence
+        this.detectionCount = detectionCount
+    }
+
     fun showTapFeedback(x: Float, y: Float) {
         tapX = x
         tapY = y
@@ -113,6 +145,7 @@ class TrackingOverlay @JvmOverloads constructor(
         super.onDraw(canvas)
 
         drawTapFeedback(canvas)
+        drawStatusIndicator(canvas)
 
         val box = subjectBox ?: return
 
@@ -143,6 +176,51 @@ class TrackingOverlay @JvmOverloads constructor(
                 drawStateLabel(canvas, box, "RE-ID", Color.parseColor("#FF8C00"))
             }
         }
+    }
+
+    private fun drawStatusIndicator(canvas: Canvas) {
+        val dotColor: Int
+        val statusText: String
+
+        when (trackerState) {
+            TrackerState.IDLE -> {
+                dotColor = Color.parseColor("#888888")
+                statusText = if (detectionCount > 0) "$detectionCount detectados" else "LISTO"
+            }
+            TrackerState.TRACKING -> {
+                dotColor = Color.parseColor("#00FF88")
+                val pct = (confidence * 100).toInt()
+                statusText = "LOCK $pct%"
+            }
+            TrackerState.LOST -> {
+                dotColor = Color.parseColor("#FFD700")
+                statusText = "PERDIDO"
+            }
+            TrackerState.RE_IDENTIFYING -> {
+                dotColor = Color.parseColor("#FF8C00")
+                statusText = "BUSCANDO"
+            }
+        }
+
+        statusTextPaint.textSize = STATUS_TEXT_SIZE
+        val textWidth = statusTextPaint.measureText(statusText)
+        val pillWidth = STATUS_DOT_RADIUS * 2 + STATUS_PADDING * 3 + textWidth
+        val pillHeight = STATUS_TEXT_SIZE + STATUS_PADDING * 1.4f
+
+        val left = STATUS_PADDING
+        val top = STATUS_MARGIN_TOP
+        val pillRect = RectF(left, top, left + pillWidth, top + pillHeight)
+
+        canvas.drawRoundRect(pillRect, STATUS_PILL_RADIUS, STATUS_PILL_RADIUS, statusBgPaint)
+
+        statusDotPaint.color = dotColor
+        val dotCx = left + STATUS_PADDING + STATUS_DOT_RADIUS
+        val dotCy = top + pillHeight / 2f
+        canvas.drawCircle(dotCx, dotCy, STATUS_DOT_RADIUS, statusDotPaint)
+
+        val textX = dotCx + STATUS_DOT_RADIUS + STATUS_PADDING
+        val textY = top + pillHeight / 2f + STATUS_TEXT_SIZE / 3f
+        canvas.drawText(statusText, textX, textY, statusTextPaint)
     }
 
     private fun updateAutoFrameGuide(box: RectF?) {
@@ -247,7 +325,6 @@ class TrackingOverlay @JvmOverloads constructor(
             rect.bottom + shiftY
         )
     }
-
 
     private fun currentGuideAspect(): Float {
         return if (width > height) {

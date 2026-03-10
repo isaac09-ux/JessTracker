@@ -16,7 +16,7 @@ class EmbeddingExtractor {
 
     companion object {
         private const val BINS_PER_ZONE = 32
-        private const val TOTAL_BINS = 96
+        const val TOTAL_BINS = 96
         private const val HUE_RANGE = 360f
         private const val SATURATION_THRESHOLD = 0.12f
         private const val VALUE_THRESHOLD = 0.12f

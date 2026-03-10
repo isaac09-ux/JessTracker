@@ -177,7 +177,13 @@ class CameraManager(
     ) {
         try {
             val bitmap = imageProxy.toBitmap()
-            val rotatedBitmap = rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees.toFloat())
+            val degrees = imageProxy.imageInfo.rotationDegrees.toFloat()
+            val rotatedBitmap = rotateBitmap(bitmap, degrees)
+
+            // Reciclar el bitmap original si se creo uno rotado nuevo.
+            if (rotatedBitmap !== bitmap) {
+                bitmap.recycle()
+            }
 
             val detections = personDetector.detect(rotatedBitmap)
             onDetections(detections, rotatedBitmap)
@@ -271,7 +277,11 @@ class CameraManager(
         val compensatedX = (centerX + (0.5f - centerX) * MAX_CENTER_BIAS * damping).coerceIn(0.05f, 0.95f)
         val compensatedY = (centerY + (0.5f - centerY) * MAX_CENTER_BIAS * damping).coerceIn(0.05f, 0.95f)
 
-        val point = previewView.meteringPointFactory.createPoint(compensatedX, compensatedY)
+        // meteringPointFactory.createPoint() espera coordenadas en pixeles del view.
+        val pixelX = compensatedX * previewView.width
+        val pixelY = compensatedY * previewView.height
+
+        val point = previewView.meteringPointFactory.createPoint(pixelX, pixelY)
         val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
             .setAutoCancelDuration(2, TimeUnit.SECONDS)
             .build()

@@ -20,6 +20,7 @@ class SubjectTracker {
     companion object {
         private const val MAX_REFERENCE_DISTANCE_FOR_TAP = 0.22f
         private const val TAP_INSIDE_BONUS = 0.35f
+        private const val EMBEDDING_BUFFER_SIZE = 4
     }
 
     // --- Estado publico ---
@@ -39,7 +40,6 @@ class SubjectTracker {
     private val smoothingFilter = SmoothingFilter()
 
     private val embeddingBuffer = mutableListOf<FloatArray>()
-    private val EMBEDDING_BUFFER_SIZE = 4
 
     private var lastCenterX: Float? = null
     private var lastCenterY: Float? = null
@@ -111,9 +111,12 @@ class SubjectTracker {
         }
 
         updateMotion(bestMatch)
-        updateEmbeddingBuffer(bestMatch, frame)
 
+        // Extraer embedding y patch una sola vez (antes se hacia doble).
         val patch = embeddingExtractor.cropPatch(frame, bestMatch)
+        val embedding = embeddingExtractor.extractFromPatch(patch)
+        addToEmbeddingBuffer(embedding)
+
         identity = currentIdentity.copy(
             embedding = averageEmbedding(),
             lastKnownBox = RectF(bestMatch),
@@ -155,23 +158,40 @@ class SubjectTracker {
             return null
         }
 
+        val lastKnown = currentIdentity.lastKnownBox
+
         val bestCandidate = detections
             .map { box ->
                 val embedding = embeddingExtractor.extract(frame, box)
                 val similarity = currentIdentity.cosineSimilarity(embedding)
-                Pair(box, similarity)
+
+                // Usar proximidad a la ultima posicion conocida como factor secundario.
+                // Un jugador que desaparecio probablemente reaparezca cerca de donde estaba.
+                val proximity = 1f - normalizedCenterDistance(
+                    PointF(
+                        (lastKnown.left + lastKnown.right) / 2f,
+                        (lastKnown.top + lastKnown.bottom) / 2f
+                    ),
+                    box
+                ).coerceIn(0f, 1f)
+
+                val combinedScore = similarity * 0.80f + proximity * 0.20f
+                Triple(box, combinedScore, embedding)
             }
-            .filter { (_, similarity) ->
-                similarity >= SubjectIdentity.SIMILARITY_THRESHOLD
+            .filter { (_, score, _) ->
+                score >= SubjectIdentity.SIMILARITY_THRESHOLD
             }
-            .maxByOrNull { (_, similarity) -> similarity }
+            .maxByOrNull { (_, score, _) -> score }
 
         if (bestCandidate == null) {
             identity = currentIdentity.incrementLost()
             return cropBox
         }
 
-        val (foundBox, similarity) = bestCandidate
+        val (foundBox, combinedScore, _) = bestCandidate
+
+        // Extraer embedding limpio del patch final (no reusar el de comparacion
+        // porque este viene del resize a PATCH_WIDTH/HEIGHT).
         val patch = embeddingExtractor.cropPatch(frame, foundBox)
         val newEmbedding = embeddingExtractor.extractFromPatch(patch)
 
@@ -182,7 +202,7 @@ class SubjectTracker {
             embedding = newEmbedding,
             lastKnownBox = RectF(foundBox),
             lastKnownPatch = patch,
-            confidence = similarity,
+            confidence = combinedScore,
             framesLost = 0
         )
 
@@ -332,8 +352,7 @@ class SubjectTracker {
         return if (unionArea <= 0f) 0f else intersectArea / unionArea
     }
 
-    private fun updateEmbeddingBuffer(box: RectF, frame: Bitmap) {
-        val embedding = embeddingExtractor.extract(frame, box)
+    private fun addToEmbeddingBuffer(embedding: FloatArray) {
         embeddingBuffer.add(embedding)
         if (embeddingBuffer.size > EMBEDDING_BUFFER_SIZE) {
             embeddingBuffer.removeAt(0)
@@ -341,14 +360,16 @@ class SubjectTracker {
     }
 
     private fun averageEmbedding(): FloatArray {
-        if (embeddingBuffer.isEmpty()) return FloatArray(96)
-        val result = FloatArray(96)
+        if (embeddingBuffer.isEmpty()) return FloatArray(EmbeddingExtractor.TOTAL_BINS)
+        val size = embeddingBuffer.first().size
+        val result = FloatArray(size)
         for (embedding in embeddingBuffer) {
             for (i in embedding.indices) {
                 result[i] += embedding[i]
             }
         }
-        return FloatArray(96) { result[it] / embeddingBuffer.size }
+        val count = embeddingBuffer.size.toFloat()
+        return FloatArray(size) { result[it] / count }
     }
 }
 
