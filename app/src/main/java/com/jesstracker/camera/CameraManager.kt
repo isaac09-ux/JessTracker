@@ -8,7 +8,7 @@ import android.util.Size
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.*
-import com.jesstracker.ui.CameraPreviewView
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.jesstracker.tracking.SubjectTracker
@@ -55,7 +55,7 @@ class CameraManager(
     // --- Setup ---
 
     fun setup(
-        previewView: CameraPreviewView,
+        previewView: PreviewView,
         onDetections: (detections: List<RectF>, frame: Bitmap) -> Unit
     ) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -69,7 +69,7 @@ class CameraManager(
     }
 
     private fun bindUseCases(
-        previewView: CameraPreviewView,
+        previewView: PreviewView,
         onDetections: (List<RectF>, Bitmap) -> Unit
     ) {
         val provider = cameraProvider ?: return
