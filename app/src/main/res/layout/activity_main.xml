@@ -6,7 +6,7 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- Preview de la cámara — ocupa toda la pantalla -->
+    <!-- Preview de la camara — ocupa toda la pantalla -->
     <com.jesstracker.ui.CameraPreviewView
         android:id="@+id/previewView"
         android:layout_width="0dp"
@@ -16,7 +16,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Overlay del tracker — encima del preview, mismo tamaño -->
+    <!-- Overlay del tracker — encima del preview, mismo tamano -->
     <com.jesstracker.ui.TrackingOverlay
         android:id="@+id/trackingOverlay"
         android:layout_width="0dp"
@@ -27,12 +27,12 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Botón de grabación — esquina inferior derecha -->
+    <!-- Boton de grabacion — esquina inferior derecha -->
     <Button
         android:id="@+id/btnRecord"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="● REC"
+        android:text="REC"
         android:textColor="#FFFFFF"
         android:backgroundTint="#CC000000"
         android:paddingHorizontal="24dp"
