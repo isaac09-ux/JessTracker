@@ -6,7 +6,9 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
 import android.os.Bundle
+import android.content.res.Configuration
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import android.widget.Button
 import android.widget.Toast
@@ -77,6 +79,14 @@ class MainActivity : AppCompatActivity() {
         checkPermissions()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (::cameraManager.isInitialized) {
+            val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
+            cameraManager.setTargetRotation(rotation)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (::cameraManager.isInitialized) {
@@ -99,6 +109,9 @@ class MainActivity : AppCompatActivity() {
             context = this,
             lifecycleOwner = this
         )
+
+        val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
+        cameraManager.setTargetRotation(rotation)
 
         cameraManager.setup(
             previewView = previewView,
