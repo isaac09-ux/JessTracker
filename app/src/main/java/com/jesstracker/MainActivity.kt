@@ -249,6 +249,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupRecordButton() {
         val btnRecord = findViewById<Button>(R.id.btnRecord)
         btnRecord.setOnClickListener {
+            if (!::cameraManager.isInitialized) return@setOnClickListener
             if (cameraManager.isRecording) {
                 cameraManager.stopRecording()
                 btnRecord.text = "\u25CF REC"
@@ -268,6 +269,7 @@ class MainActivity : AppCompatActivity() {
                     },
                     onRecordingError = { error ->
                         runOnUiThread {
+                            btnRecord.text = "\u25CF REC"
                             Toast.makeText(this, error, Toast.LENGTH_LONG).show()
                         }
                     }
