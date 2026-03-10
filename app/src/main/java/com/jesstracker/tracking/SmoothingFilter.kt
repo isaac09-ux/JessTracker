@@ -15,9 +15,11 @@ import kotlin.math.sqrt
 class SmoothingFilter {
 
     companion object {
-        const val FAST_ALPHA = 0.8f
-        const val SLOW_ALPHA = 0.3f
-        const val VELOCITY_THRESHOLD = 0.02f
+        // Valores mas agresivos para priorizar respuesta rapida
+        // (ideal en deportes con aceleraciones bruscas como voleibol).
+        const val FAST_ALPHA = 0.96f
+        const val SLOW_ALPHA = 0.68f
+        const val VELOCITY_THRESHOLD = 0.007f
     }
 
     private var previousBox: RectF? = null
