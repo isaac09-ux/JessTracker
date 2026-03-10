@@ -67,6 +67,8 @@ class CameraManager(
 
     private var currentZoomRatio: Float = MIN_ZOOM
 
+    private var currentZoomRatio: Float = MIN_ZOOM
+
     var isRecording: Boolean = false
         private set
 
