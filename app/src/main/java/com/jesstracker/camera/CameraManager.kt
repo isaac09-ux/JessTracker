@@ -1,58 +1,74 @@
 package com.jesstracker.camera
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.RectF
+import android.hardware.camera2.CaptureRequest
+import android.provider.MediaStore
 import android.util.Size
-import androidx.camera.core.*
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.*
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import com.jesstracker.tracking.SubjectTracker
-import java.io.File
+import com.jesstracker.tracking.TrackerState
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
  * CameraManager — conecta CameraX con el SubjectTracker.
- *
- * Dos streams simultaneos:
- *
- *   Stream 1: ImageAnalysis (720p)
- *     -> MediaPipe detecta personas
- *     -> SubjectTracker actualiza cropBox
- *     -> TrackingOverlay renderiza el encuadre
- *
- *   Stream 2: VideoCapture (4K)
- *     -> Grabacion limpia sin procesamiento
- *     -> El crop se aplica como overlay visual,
- *       no modifica el video grabado (full quality)
  */
 class CameraManager(
     private val context: Context,
-    private val lifecycleOwner: LifecycleOwner,
-    private val tracker: SubjectTracker
+    private val lifecycleOwner: LifecycleOwner
 ) {
 
-    // --- CameraX components ---
+    companion object {
+        private const val PORTRAIT_TARGET_SUBJECT_HEIGHT = 0.66f
+        private const val LANDSCAPE_TARGET_SUBJECT_HEIGHT = 0.52f
+        private const val MIN_ZOOM = 1.0f
+        private const val MAX_ZOOM = 4.0f
+        private const val BASE_ZOOM_SMOOTHING = 0.34f
+        private const val ZOOM_RESET_SMOOTHING = 0.15f
+
+        // Umbrales para adaptar framing segun movimiento real del dispositivo.
+        private const val LOW_HAND_MOTION = 0.18f
+        private const val HIGH_HAND_MOTION = 0.9f
+    }
 
     private var cameraProvider: ProcessCameraProvider? = null
+    private var activeCamera: Camera? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-
     private val personDetector = PersonDetector(context)
+    private val deviceMotionEstimator = DeviceMotionEstimator(context)
 
-    // --- Estado ---
+    private var currentZoomRatio: Float = MIN_ZOOM
 
     var isRecording: Boolean = false
         private set
-
-    // --- Setup ---
 
     fun setup(
         previewView: PreviewView,
@@ -61,6 +77,7 @@ class CameraManager(
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         analysisExecutor.execute { personDetector.initialize() }
+        deviceMotionEstimator.start()
 
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
@@ -74,16 +91,33 @@ class CameraManager(
     ) {
         val provider = cameraProvider ?: return
 
-        // Use Case 1: Preview
-        val preview = Preview.Builder()
+        val previewBuilder = Preview.Builder()
+        val previewInterop = Camera2Interop.Extender(previewBuilder)
+        previewInterop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        )
+        previewInterop.setCaptureRequestOption(
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        )
+
+        val preview = previewBuilder
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-        // Use Case 2: ImageAnalysis (720p para MediaPipe)
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(Size(1280, 720))
+        val analysisBuilder = ImageAnalysis.Builder()
+            .setTargetResolution(Size(960, 540))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+
+        val analysisInterop = Camera2Interop.Extender(analysisBuilder)
+        analysisInterop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        )
+
+        val imageAnalysis = analysisBuilder
             .build()
             .also { analysis ->
                 analysis.setAnalyzer(analysisExecutor) { imageProxy ->
@@ -91,7 +125,6 @@ class CameraManager(
                 }
             }
 
-        // Use Case 3: VideoCapture (4K)
         val recorder = Recorder.Builder()
             .setQualitySelector(
                 QualitySelector.from(
@@ -103,22 +136,21 @@ class CameraManager(
 
         videoCapture = VideoCapture.withOutput(recorder)
 
-        // Bind al lifecycle
         try {
             provider.unbindAll()
-            provider.bindToLifecycle(
+            activeCamera = provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
                 imageAnalysis,
                 videoCapture
             )
+            currentZoomRatio = MIN_ZOOM
+            enableDeviceStabilization()
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
-
-    // --- Procesamiento de frames ---
 
     private fun processFrame(
         imageProxy: ImageProxy,
@@ -141,10 +173,85 @@ class CameraManager(
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
-    // --- Grabacion ---
+    fun updateAutoFraming(
+        state: TrackerState,
+        trackedBox: RectF?,
+        detections: List<RectF>,
+        viewWidth: Int,
+        viewHeight: Int
+    ) {
+        if (state == TrackerState.TRACKING && trackedBox != null) {
+            val isLandscape = viewWidth > viewHeight
+            val baseTargetSubjectSize = if (isLandscape) {
+                LANDSCAPE_TARGET_SUBJECT_HEIGHT
+            } else {
+                PORTRAIT_TARGET_SUBJECT_HEIGHT
+            }
+
+            val subjectHeight = (trackedBox.bottom - trackedBox.top).coerceAtLeast(0.01f)
+            val centerX = (trackedBox.left + trackedBox.right) * 0.5f
+            val centerY = (trackedBox.top + trackedBox.bottom) * 0.5f
+            val distanceToNearestEdge = minOf(centerX, 1f - centerX, centerY, 1f - centerY)
+
+            val edgeCompensation = if (distanceToNearestEdge < 0.16f) 0.88f else 1f
+            val crowdCompensation = when {
+                detections.size >= 8 -> 1.12f
+                detections.size >= 5 -> 1.06f
+                else -> 1f
+            }
+
+            val adaptiveTargetSubjectSize = (baseTargetSubjectSize * crowdCompensation * edgeCompensation)
+                .coerceIn(0.44f, 0.74f)
+
+            val targetZoom = (adaptiveTargetSubjectSize / subjectHeight).coerceIn(MIN_ZOOM, MAX_ZOOM)
+
+            val handMotion = deviceMotionEstimator.angularSpeed()
+            val motionFactor = when {
+                handMotion <= LOW_HAND_MOTION -> 1.12f
+                handMotion >= HIGH_HAND_MOTION -> 0.55f
+                else -> 1.12f - ((handMotion - LOW_HAND_MOTION) / (HIGH_HAND_MOTION - LOW_HAND_MOTION)) * 0.57f
+            }
+
+            val adaptiveSmoothing = (BASE_ZOOM_SMOOTHING * motionFactor).coerceIn(0.18f, 0.42f)
+            val smoothedZoom = currentZoomRatio + (targetZoom - currentZoomRatio) * adaptiveSmoothing
+            applyZoom(smoothedZoom)
+            return
+        }
+
+        val relaxedZoom = currentZoomRatio + (MIN_ZOOM - currentZoomRatio) * ZOOM_RESET_SMOOTHING
+        applyZoom(relaxedZoom)
+    }
+
+    private fun applyZoom(zoomRatio: Float) {
+        val clamped = zoomRatio.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        currentZoomRatio = clamped
+        activeCamera?.cameraControl?.setZoomRatio(clamped)
+    }
+
+    private fun enableDeviceStabilization() {
+        val camera = activeCamera ?: return
+        try {
+            val options = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+                .setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+                .build()
+
+            Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options)
+        } catch (e: Exception) {
+            // Algunos dispositivos no soportan ambos modos a la vez.
+            e.printStackTrace()
+        }
+    }
 
     fun startRecording(
         onRecordingStarted: () -> Unit = {},
+        onRecordingSaved: (String) -> Unit = {},
         onRecordingError: (String) -> Unit = {}
     ) {
         val capture = videoCapture ?: run {
@@ -152,21 +259,25 @@ class CameraManager(
             return
         }
 
-        val outputFile = createOutputFile()
-        val outputOptions = FileOutputOptions.Builder(outputFile).build()
+        val outputOptions = createGalleryOutputOptions()
 
         activeRecording = capture.output
             .prepareRecording(context, outputOptions)
+            .withAudioEnabled()
             .start(ContextCompat.getMainExecutor(context)) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> {
                         isRecording = true
                         onRecordingStarted()
                     }
+
                     is VideoRecordEvent.Finalize -> {
                         isRecording = false
                         if (event.hasError()) {
                             onRecordingError("Error al grabar: ${event.error}")
+                        } else {
+                            val uri = event.outputResults.outputUri
+                            onRecordingSaved(uri.toString())
                         }
                     }
                 }
@@ -178,17 +289,25 @@ class CameraManager(
         activeRecording = null
     }
 
-    private fun createOutputFile(): File {
-        val moviesDir = context.getExternalFilesDir("Movies")
-            ?: context.filesDir
-        val timestamp = System.currentTimeMillis()
-        return File(moviesDir, "jess_$timestamp.mp4")
-    }
+    private fun createGalleryOutputOptions(): MediaStoreOutputOptions {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "jess_$timestamp")
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/JessTracker")
+        }
 
-    // --- Lifecycle ---
+        return MediaStoreOutputOptions.Builder(
+            context.contentResolver,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        )
+            .setContentValues(contentValues)
+            .build()
+    }
 
     fun shutdown() {
         personDetector.close()
+        deviceMotionEstimator.stop()
         analysisExecutor.shutdown()
         cameraProvider?.unbindAll()
     }

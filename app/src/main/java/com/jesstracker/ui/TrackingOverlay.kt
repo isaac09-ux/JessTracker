@@ -1,29 +1,40 @@
 package com.jesstracker.ui
 
 import android.content.Context
-import android.graphics.*
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
 import com.jesstracker.tracking.TrackerState
 
 /**
  * TrackingOverlay — dibuja sobre el preview el estado visual del tracker.
- *
- * Renderiza:
- *   - Bounding box del sujeto seleccionado (color segun estado)
- *   - Indicador de estado (TRACKING / LOST / RE-IDENTIFYING)
- *   - Animacion de tap cuando el usuario selecciona un sujeto
- *   - Crop guide — el encuadre final que tendra el video
  */
 class TrackingOverlay @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
+    companion object {
+        private const val FRAME_GUIDE_HEIGHT_RATIO = 0.7f
+        private const val PORTRAIT_FRAME_GUIDE_ASPECT = 9f / 16f
+        private const val LANDSCAPE_FRAME_GUIDE_ASPECT = 16f / 9f
+        private const val FRAME_SMOOTHING = 0.28f
+        private const val LEAD_FACTOR = 0.35f
+    }
+
     // --- Estado ---
 
     private var trackerState: TrackerState = TrackerState.IDLE
     private var subjectBox: RectF? = null
+    private var frameGuideRect: RectF? = null
+    private var lastCenterX: Float? = null
+    private var lastCenterY: Float? = null
+
     private var tapX: Float = 0f
     private var tapY: Float = 0f
     private var tapAlpha: Int = 0
@@ -75,11 +86,18 @@ class TrackingOverlay @JvmOverloads constructor(
         pathEffect = DashPathEffect(floatArrayOf(4f, 4f), 0f)
     }
 
-    // --- API publica ---
-
     fun update(state: TrackerState, cropBox: RectF?) {
         trackerState = state
         subjectBox = cropBox?.let { denormalize(it) }
+
+        if (state == TrackerState.TRACKING) {
+            updateAutoFrameGuide(subjectBox)
+        } else if (state == TrackerState.IDLE) {
+            frameGuideRect = null
+            lastCenterX = null
+            lastCenterY = null
+        }
+
         invalidate()
     }
 
@@ -91,8 +109,6 @@ class TrackingOverlay @JvmOverloads constructor(
         postDelayed({ fadeTap() }, 50)
     }
 
-    // --- Dibujo ---
-
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
@@ -102,13 +118,12 @@ class TrackingOverlay @JvmOverloads constructor(
 
         when (trackerState) {
             TrackerState.IDLE -> return
-
             TrackerState.TRACKING -> {
                 fillPaint.color = Color.parseColor("#2000FF88")
                 canvas.drawRoundRect(box, 8f, 8f, fillPaint)
                 canvas.drawRoundRect(box, 8f, 8f, trackingPaint)
                 drawCornerAccents(canvas, box, trackingPaint)
-                drawCropGuide(canvas, box)
+                drawCropGuide(canvas)
                 drawStateLabel(canvas, box, "TRACKING", Color.parseColor("#00FF88"))
             }
 
@@ -116,6 +131,7 @@ class TrackingOverlay @JvmOverloads constructor(
                 fillPaint.color = Color.parseColor("#20FFD700")
                 canvas.drawRoundRect(box, 8f, 8f, fillPaint)
                 canvas.drawRoundRect(box, 8f, 8f, lostPaint)
+                drawCropGuide(canvas)
                 drawStateLabel(canvas, box, "BUSCANDO...", Color.parseColor("#FFD700"))
             }
 
@@ -123,9 +139,42 @@ class TrackingOverlay @JvmOverloads constructor(
                 fillPaint.color = Color.parseColor("#20FF8C00")
                 canvas.drawRoundRect(box, 8f, 8f, fillPaint)
                 canvas.drawRoundRect(box, 8f, 8f, reIdPaint)
+                drawCropGuide(canvas)
                 drawStateLabel(canvas, box, "RE-ID", Color.parseColor("#FF8C00"))
             }
         }
+    }
+
+    private fun updateAutoFrameGuide(box: RectF?) {
+        box ?: return
+
+        val centerX = (box.left + box.right) / 2f
+        val centerY = (box.top + box.bottom) / 2f
+
+        val prevX = lastCenterX ?: centerX
+        val prevY = lastCenterY ?: centerY
+
+        val velocityX = centerX - prevX
+        val velocityY = centerY - prevY
+
+        lastCenterX = centerX
+        lastCenterY = centerY
+
+        val predictedX = (centerX + velocityX * LEAD_FACTOR).coerceIn(0f, width.toFloat())
+        val predictedY = (centerY + velocityY * LEAD_FACTOR).coerceIn(0f, height.toFloat())
+
+        val cropHeight = height * FRAME_GUIDE_HEIGHT_RATIO
+        val aspect = currentGuideAspect()
+        val cropWidth = cropHeight * aspect
+
+        val targetRect = RectF(
+            predictedX - cropWidth / 2f,
+            predictedY - cropHeight / 2f,
+            predictedX + cropWidth / 2f,
+            predictedY + cropHeight / 2f
+        )
+
+        frameGuideRect = smoothRect(frameGuideRect, clampToView(targetRect))
     }
 
     private fun drawCornerAccents(canvas: Canvas, box: RectF, paint: Paint) {
@@ -144,21 +193,68 @@ class TrackingOverlay @JvmOverloads constructor(
         canvas.drawLine(box.right - len, box.bottom, box.right, box.bottom, paint)
     }
 
-    private fun drawCropGuide(canvas: Canvas, subjectBox: RectF) {
+    private fun drawCropGuide(canvas: Canvas) {
+        val rect = frameGuideRect ?: subjectBox?.let { fallbackFrameGuide(it) } ?: return
+        canvas.drawRect(rect, cropGuidePaint)
+    }
+
+    private fun fallbackFrameGuide(subjectBox: RectF): RectF {
         val centerX = (subjectBox.left + subjectBox.right) / 2f
         val centerY = (subjectBox.top + subjectBox.bottom) / 2f
 
-        val cropHeight = height * 0.7f
-        val cropWidth = cropHeight * (9f / 16f)
+        val cropHeight = height * FRAME_GUIDE_HEIGHT_RATIO
+        val aspect = currentGuideAspect()
+        val cropWidth = cropHeight * aspect
 
-        val cropRect = RectF(
-            centerX - cropWidth / 2f,
-            centerY - cropHeight / 2f,
-            centerX + cropWidth / 2f,
-            centerY + cropHeight / 2f
+        return clampToView(
+            RectF(
+                centerX - cropWidth / 2f,
+                centerY - cropHeight / 2f,
+                centerX + cropWidth / 2f,
+                centerY + cropHeight / 2f
+            )
         )
+    }
 
-        canvas.drawRect(cropRect, cropGuidePaint)
+    private fun smoothRect(previous: RectF?, target: RectF): RectF {
+        if (previous == null) return target
+
+        return RectF(
+            lerp(previous.left, target.left, FRAME_SMOOTHING),
+            lerp(previous.top, target.top, FRAME_SMOOTHING),
+            lerp(previous.right, target.right, FRAME_SMOOTHING),
+            lerp(previous.bottom, target.bottom, FRAME_SMOOTHING)
+        )
+    }
+
+    private fun clampToView(rect: RectF): RectF {
+        val shiftX = when {
+            rect.left < 0f -> -rect.left
+            rect.right > width -> width - rect.right
+            else -> 0f
+        }
+
+        val shiftY = when {
+            rect.top < 0f -> -rect.top
+            rect.bottom > height -> height - rect.bottom
+            else -> 0f
+        }
+
+        return RectF(
+            rect.left + shiftX,
+            rect.top + shiftY,
+            rect.right + shiftX,
+            rect.bottom + shiftY
+        )
+    }
+
+
+    private fun currentGuideAspect(): Float {
+        return if (width > height) {
+            LANDSCAPE_FRAME_GUIDE_ASPECT
+        } else {
+            PORTRAIT_FRAME_GUIDE_ASPECT
+        }
     }
 
     private fun drawStateLabel(canvas: Canvas, box: RectF, label: String, color: Int) {
@@ -184,10 +280,14 @@ class TrackingOverlay @JvmOverloads constructor(
 
     private fun denormalize(box: RectF): RectF {
         return RectF(
-            box.left   * width,
-            box.top    * height,
-            box.right  * width,
+            box.left * width,
+            box.top * height,
+            box.right * width,
             box.bottom * height
         )
+    }
+
+    private fun lerp(from: Float, to: Float, t: Float): Float {
+        return from + (to - from) * t
     }
 }

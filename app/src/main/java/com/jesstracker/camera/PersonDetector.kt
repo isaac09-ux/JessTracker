@@ -24,8 +24,8 @@ class PersonDetector(private val context: Context) {
     companion object {
         private const val MODEL_NAME = "efficientdet_lite0.tflite"
         private const val PERSON_LABEL = "person"
-        private const val MIN_CONFIDENCE = 0.5f
-        private const val MAX_RESULTS = 12
+        private const val MIN_CONFIDENCE = 0.45f
+        private const val MAX_RESULTS = 8
     }
 
     private var detector: ObjectDetector? = null

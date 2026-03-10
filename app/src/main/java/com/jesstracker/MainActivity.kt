@@ -97,8 +97,7 @@ class MainActivity : AppCompatActivity() {
     private fun startCamera() {
         cameraManager = CameraManager(
             context = this,
-            lifecycleOwner = this,
-            tracker = tracker
+            lifecycleOwner = this
         )
 
         cameraManager.setup(
@@ -111,6 +110,13 @@ class MainActivity : AppCompatActivity() {
 
                 runOnUiThread {
                     trackingOverlay.update(tracker.state, cropBox)
+                    cameraManager.updateAutoFraming(
+                        state = tracker.state,
+                        trackedBox = cropBox,
+                        detections = detections,
+                        viewWidth = previewView.width,
+                        viewHeight = previewView.height
+                    )
                 }
             }
         )
@@ -134,6 +140,13 @@ class MainActivity : AppCompatActivity() {
                 tracker.onTap(PointF(normalizedX, normalizedY), detections, frame)
                 val cropBox = tracker.cropBox
                 trackingOverlay.update(tracker.state, cropBox)
+                cameraManager.updateAutoFraming(
+                    state = tracker.state,
+                    trackedBox = cropBox,
+                    detections = detections,
+                    viewWidth = previewView.width,
+                    viewHeight = previewView.height
+                )
             }
 
             true
@@ -152,6 +165,12 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread {
                             btnRecord.text = "\u25A0 STOP"
                             Toast.makeText(this, "Grabando en 4K...", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onRecordingSaved = { uri ->
+                        runOnUiThread {
+                            btnRecord.text = "\u25CF REC"
+                            Toast.makeText(this, "Video guardado en galería: $uri", Toast.LENGTH_LONG).show()
                         }
                     },
                     onRecordingError = { error ->
