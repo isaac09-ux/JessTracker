@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.BatteryManager
 import android.provider.MediaStore
 import android.util.Log
@@ -81,6 +83,7 @@ class CameraManager(
     private var imageAnalysisUseCase: ImageAnalysis? = null
     private var activeRecording: Recording? = null
     private var previewViewRef: PreviewView? = null
+    private var detectionsCallbackRef: ((List<RectF>, Bitmap) -> Unit)? = null
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val personDetector = PersonDetector(context)
@@ -103,6 +106,7 @@ class CameraManager(
         onDetections: (detections: List<RectF>, frame: Bitmap) -> Unit
     ) {
         previewViewRef = previewView
+        detectionsCallbackRef = onDetections
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         analysisExecutor.execute { personDetector.initialize() }
@@ -138,7 +142,7 @@ class CameraManager(
         previewUseCase = preview
 
         val analysisBuilder = ImageAnalysis.Builder()
-            .setTargetResolution(Size(960, 540))
+            .setTargetResolution(Size(640, 480))
             .setTargetRotation(targetRotation)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
@@ -180,7 +184,7 @@ class CameraManager(
                 imageAnalysis,
                 videoCapture
             )
-            currentZoomRatio = MIN_ZOOM
+            applyZoom(currentZoomRatio)
             enableDeviceStabilization()
         } catch (e: Exception) {
             Log.e(TAG, "Error binding use cases", e)
@@ -246,10 +250,25 @@ class CameraManager(
     }
 
     fun setTargetRotation(rotation: Int) {
+        if (targetRotation == rotation) return
+
+        if (isRecording) {
+            Log.w(TAG, "Ignoring rotation change during recording")
+            return
+        }
+
         targetRotation = rotation
-        previewUseCase?.targetRotation = rotation
-        imageAnalysisUseCase?.targetRotation = rotation
-        videoCapture?.targetRotation = rotation
+
+        val previewView = previewViewRef
+        val callback = detectionsCallbackRef
+        if (previewView == null || callback == null) {
+            previewUseCase?.targetRotation = rotation
+            imageAnalysisUseCase?.targetRotation = rotation
+            videoCapture?.targetRotation = rotation
+            return
+        }
+
+        bindUseCases(previewView, callback)
     }
 
     fun updateAutoFraming(
@@ -393,11 +412,24 @@ class CameraManager(
                             onRecordingError("Error al grabar: ${event.error}")
                         } else {
                             val uri = event.outputResults.outputUri
+                            scanRecordedVideo(uri)
                             onRecordingSaved(uri.toString())
                         }
                     }
                 }
             }
+    }
+
+    private fun scanRecordedVideo(uri: Uri) {
+        val path = if (uri.scheme == "file") uri.path else null
+        val target = path ?: uri.toString()
+
+        MediaScannerConnection.scanFile(
+            context,
+            arrayOf(target),
+            arrayOf("video/mp4"),
+            null
+        )
     }
 
     fun stopRecording() {

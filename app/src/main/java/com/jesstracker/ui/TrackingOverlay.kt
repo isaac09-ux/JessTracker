@@ -43,6 +43,8 @@ class TrackingOverlay @JvmOverloads constructor(
     private var frameGuideRect: RectF? = null
     private var lastCenterX: Float? = null
     private var lastCenterY: Float? = null
+    private var lastViewWidth: Int = 0
+    private var lastViewHeight: Int = 0
     private var confidence: Float = 0f
     private var detectionCount: Int = 0
 
@@ -139,6 +141,19 @@ class TrackingOverlay @JvmOverloads constructor(
         tapAlpha = 255
         invalidate()
         postDelayed({ fadeTap() }, 50)
+    }
+
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+
+        if (lastViewWidth != width || lastViewHeight != height) {
+            frameGuideRect = null
+            lastCenterX = null
+            lastCenterY = null
+        }
+
+        lastViewWidth = width
+        lastViewHeight = height
     }
 
     override fun onDraw(canvas: Canvas) {

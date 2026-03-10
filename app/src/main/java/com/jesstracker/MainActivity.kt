@@ -271,7 +271,7 @@ class MainActivity : AppCompatActivity() {
                     onRecordingSaved = { uri ->
                         runOnUiThread {
                             btnRecord.text = "\u25CF REC"
-                            Toast.makeText(this, "Video guardado en galeria: $uri", Toast.LENGTH_LONG).show()
+                            Toast.makeText(this, "Video guardado en: Peliculas/JessTracker", Toast.LENGTH_LONG).show()
                         }
                     },
                     onRecordingError = { error ->
