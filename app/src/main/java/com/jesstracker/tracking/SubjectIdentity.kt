@@ -2,6 +2,7 @@ package com.jesstracker.tracking
 
 import android.graphics.Bitmap
 import android.graphics.RectF
+import kotlin.math.sqrt
 
 /**
  * SubjectIdentity — la huella visual del sujeto seleccionado.
@@ -47,7 +48,7 @@ class SubjectIdentity(
 
         if (normA == 0f || normB == 0f) return 0f
 
-        return dotProduct / (Math.sqrt(normA.toDouble()) * Math.sqrt(normB.toDouble())).toFloat()
+        return dotProduct / (sqrt(normA) * sqrt(normB))
     }
 
     fun isLost(): Boolean = framesLost > 0

@@ -2,18 +2,20 @@ package com.jesstracker
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
 import android.os.Bundle
+import android.view.MotionEvent
+import android.view.View
 import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.jesstracker.camera.CameraManager
 import com.jesstracker.tracking.SubjectTracker
-import com.jesstracker.tracking.TrackerState
-import com.jesstracker.ui.CameraPreviewView
 import com.jesstracker.ui.TrackingOverlay
 
 /**
@@ -31,13 +33,19 @@ class MainActivity : AppCompatActivity() {
 
     // --- Views ---
 
-    private lateinit var previewView: CameraPreviewView
+    private lateinit var previewView: PreviewView
+    private lateinit var touchOverlay: View
     private lateinit var trackingOverlay: TrackingOverlay
 
     // --- Core modules ---
 
     private val tracker = SubjectTracker()
     private lateinit var cameraManager: CameraManager
+
+    // --- Estado compartido para touch (ultimo frame analizado) ---
+
+    @Volatile private var latestDetections: List<RectF> = emptyList()
+    @Volatile private var latestFrame: Bitmap? = null
 
     // --- Permisos ---
 
@@ -61,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         previewView = findViewById(R.id.previewView)
+        touchOverlay = findViewById(R.id.touchOverlay)
         trackingOverlay = findViewById(R.id.trackingOverlay)
 
         setupTouchListener()
@@ -95,6 +104,9 @@ class MainActivity : AppCompatActivity() {
         cameraManager.setup(
             previewView = previewView,
             onDetections = { detections, frame ->
+                latestDetections = detections
+                latestFrame = frame
+
                 val cropBox = tracker.update(detections, frame)
 
                 runOnUiThread {
@@ -104,13 +116,27 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    @Suppress("ClickableViewAccessibility")
     private fun setupTouchListener() {
-        previewView.onSubjectSelected = { normalizedPoint: PointF ->
-            Toast.makeText(this, "Sujeto seleccionado", Toast.LENGTH_SHORT).show()
-        }
+        touchOverlay.setOnTouchListener { v, event ->
+            if (event.action != MotionEvent.ACTION_DOWN) return@setOnTouchListener false
 
-        previewView.onTapFeedback = { x, y ->
-            trackingOverlay.showTapFeedback(x, y)
+            val screenX = event.x
+            val screenY = event.y
+            val normalizedX = screenX / v.width.toFloat()
+            val normalizedY = screenY / v.height.toFloat()
+
+            trackingOverlay.showTapFeedback(screenX, screenY)
+
+            val frame = latestFrame
+            val detections = latestDetections
+            if (frame != null && detections.isNotEmpty()) {
+                tracker.onTap(PointF(normalizedX, normalizedY), detections, frame)
+                val cropBox = tracker.cropBox
+                trackingOverlay.update(tracker.state, cropBox)
+            }
+
+            true
         }
     }
 
