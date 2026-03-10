@@ -2,6 +2,9 @@ package com.jesstracker
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.PointF
+import android.graphics.RectF
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.View
@@ -38,6 +41,11 @@ class MainActivity : AppCompatActivity() {
 
     private val tracker = SubjectTracker()
     private lateinit var cameraManager: CameraManager
+
+    // --- Estado compartido para touch (ultimo frame analizado) ---
+
+    @Volatile private var latestDetections: List<RectF> = emptyList()
+    @Volatile private var latestFrame: Bitmap? = null
 
     // --- Permisos ---
 
@@ -96,6 +104,9 @@ class MainActivity : AppCompatActivity() {
         cameraManager.setup(
             previewView = previewView,
             onDetections = { detections, frame ->
+                latestDetections = detections
+                latestFrame = frame
+
                 val cropBox = tracker.update(detections, frame)
 
                 runOnUiThread {
@@ -116,7 +127,14 @@ class MainActivity : AppCompatActivity() {
             val normalizedY = screenY / v.height.toFloat()
 
             trackingOverlay.showTapFeedback(screenX, screenY)
-            Toast.makeText(this, "Sujeto seleccionado", Toast.LENGTH_SHORT).show()
+
+            val frame = latestFrame
+            val detections = latestDetections
+            if (frame != null && detections.isNotEmpty()) {
+                tracker.onTap(PointF(normalizedX, normalizedY), detections, frame)
+                val cropBox = tracker.cropBox
+                trackingOverlay.update(tracker.state, cropBox)
+            }
 
             true
         }

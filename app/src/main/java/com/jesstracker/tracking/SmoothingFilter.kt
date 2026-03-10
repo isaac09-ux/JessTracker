@@ -1,6 +1,7 @@
 package com.jesstracker.tracking
 
 import android.graphics.RectF
+import kotlin.math.sqrt
 
 /**
  * SmoothingFilter — suaviza el movimiento del crop usando EMA adaptativo.
@@ -35,10 +36,9 @@ class SmoothingFilter {
         val newCenterX  = (newBox.left + newBox.right) / 2f
         val newCenterY  = (newBox.top + newBox.bottom) / 2f
 
-        velocity = Math.sqrt(
-            ((newCenterX - prevCenterX) * (newCenterX - prevCenterX) +
-             (newCenterY - prevCenterY) * (newCenterY - prevCenterY)).toDouble()
-        ).toFloat()
+        val dx = newCenterX - prevCenterX
+        val dy = newCenterY - prevCenterY
+        velocity = sqrt(dx * dx + dy * dy)
 
         val adaptiveAlpha = if (velocity > VELOCITY_THRESHOLD) FAST_ALPHA else SLOW_ALPHA
 
