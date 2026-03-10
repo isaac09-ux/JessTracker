@@ -21,7 +21,8 @@ class TrackingOverlay @JvmOverloads constructor(
 
     companion object {
         private const val FRAME_GUIDE_HEIGHT_RATIO = 0.7f
-        private const val FRAME_GUIDE_ASPECT = 9f / 16f
+        private const val PORTRAIT_FRAME_GUIDE_ASPECT = 9f / 16f
+        private const val LANDSCAPE_FRAME_GUIDE_ASPECT = 16f / 9f
         private const val FRAME_SMOOTHING = 0.28f
         private const val LEAD_FACTOR = 0.35f
     }
@@ -163,7 +164,8 @@ class TrackingOverlay @JvmOverloads constructor(
         val predictedY = (centerY + velocityY * LEAD_FACTOR).coerceIn(0f, height.toFloat())
 
         val cropHeight = height * FRAME_GUIDE_HEIGHT_RATIO
-        val cropWidth = cropHeight * FRAME_GUIDE_ASPECT
+        val aspect = currentGuideAspect()
+        val cropWidth = cropHeight * aspect
 
         val targetRect = RectF(
             predictedX - cropWidth / 2f,
@@ -201,7 +203,8 @@ class TrackingOverlay @JvmOverloads constructor(
         val centerY = (subjectBox.top + subjectBox.bottom) / 2f
 
         val cropHeight = height * FRAME_GUIDE_HEIGHT_RATIO
-        val cropWidth = cropHeight * FRAME_GUIDE_ASPECT
+        val aspect = currentGuideAspect()
+        val cropWidth = cropHeight * aspect
 
         return clampToView(
             RectF(
@@ -243,6 +246,15 @@ class TrackingOverlay @JvmOverloads constructor(
             rect.right + shiftX,
             rect.bottom + shiftY
         )
+    }
+
+
+    private fun currentGuideAspect(): Float {
+        return if (width > height) {
+            LANDSCAPE_FRAME_GUIDE_ASPECT
+        } else {
+            PORTRAIT_FRAME_GUIDE_ASPECT
+        }
     }
 
     private fun drawStateLabel(canvas: Canvas, box: RectF, label: String, color: Int) {

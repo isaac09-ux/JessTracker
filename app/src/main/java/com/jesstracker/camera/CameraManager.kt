@@ -5,8 +5,12 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.RectF
+import android.hardware.camera2.CaptureRequest
 import android.provider.MediaStore
 import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -40,14 +44,17 @@ class CameraManager(
 ) {
 
     companion object {
-        private const val TARGET_SUBJECT_HEIGHT = 0.66f
+        private const val PORTRAIT_TARGET_SUBJECT_HEIGHT = 0.66f
+        private const val LANDSCAPE_TARGET_SUBJECT_HEIGHT = 0.52f
         private const val MIN_ZOOM = 1.0f
         private const val MAX_ZOOM = 4.0f
-        private const val ZOOM_SMOOTHING = 0.34f
+        private const val BASE_ZOOM_SMOOTHING = 0.34f
         private const val ZOOM_RESET_SMOOTHING = 0.15f
-    }
 
-    // --- CameraX components ---
+        // Umbrales para adaptar framing segun movimiento real del dispositivo.
+        private const val LOW_HAND_MOTION = 0.18f
+        private const val HIGH_HAND_MOTION = 0.9f
+    }
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var activeCamera: Camera? = null
@@ -56,15 +63,14 @@ class CameraManager(
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val personDetector = PersonDetector(context)
+    private val deviceMotionEstimator = DeviceMotionEstimator(context)
 
-    // --- Estado ---
+    private var currentZoomRatio: Float = MIN_ZOOM
 
     private var currentZoomRatio: Float = MIN_ZOOM
 
     var isRecording: Boolean = false
         private set
-
-    // --- Setup ---
 
     fun setup(
         previewView: PreviewView,
@@ -73,6 +79,7 @@ class CameraManager(
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         analysisExecutor.execute { personDetector.initialize() }
+        deviceMotionEstimator.start()
 
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
@@ -86,14 +93,33 @@ class CameraManager(
     ) {
         val provider = cameraProvider ?: return
 
-        val preview = Preview.Builder()
+        val previewBuilder = Preview.Builder()
+        val previewInterop = Camera2Interop.Extender(previewBuilder)
+        previewInterop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        )
+        previewInterop.setCaptureRequestOption(
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        )
+
+        val preview = previewBuilder
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-        val imageAnalysis = ImageAnalysis.Builder()
+        val analysisBuilder = ImageAnalysis.Builder()
             .setTargetResolution(Size(960, 540))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+
+        val analysisInterop = Camera2Interop.Extender(analysisBuilder)
+        analysisInterop.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        )
+
+        val imageAnalysis = analysisBuilder
             .build()
             .also { analysis ->
                 analysis.setAnalyzer(analysisExecutor) { imageProxy ->
@@ -122,12 +148,11 @@ class CameraManager(
                 videoCapture
             )
             currentZoomRatio = MIN_ZOOM
+            enableDeviceStabilization()
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
-
-    // --- Procesamiento de frames ---
 
     private fun processFrame(
         imageProxy: ImageProxy,
@@ -150,13 +175,47 @@ class CameraManager(
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
-    // --- Auto framing (zoom en sujeto seleccionado) ---
-
-    fun updateAutoFraming(state: TrackerState, trackedBox: RectF?) {
+    fun updateAutoFraming(
+        state: TrackerState,
+        trackedBox: RectF?,
+        detections: List<RectF>,
+        viewWidth: Int,
+        viewHeight: Int
+    ) {
         if (state == TrackerState.TRACKING && trackedBox != null) {
+            val isLandscape = viewWidth > viewHeight
+            val baseTargetSubjectSize = if (isLandscape) {
+                LANDSCAPE_TARGET_SUBJECT_HEIGHT
+            } else {
+                PORTRAIT_TARGET_SUBJECT_HEIGHT
+            }
+
             val subjectHeight = (trackedBox.bottom - trackedBox.top).coerceAtLeast(0.01f)
-            val targetZoom = (TARGET_SUBJECT_HEIGHT / subjectHeight).coerceIn(MIN_ZOOM, MAX_ZOOM)
-            val smoothedZoom = currentZoomRatio + (targetZoom - currentZoomRatio) * ZOOM_SMOOTHING
+            val centerX = (trackedBox.left + trackedBox.right) * 0.5f
+            val centerY = (trackedBox.top + trackedBox.bottom) * 0.5f
+            val distanceToNearestEdge = minOf(centerX, 1f - centerX, centerY, 1f - centerY)
+
+            val edgeCompensation = if (distanceToNearestEdge < 0.16f) 0.88f else 1f
+            val crowdCompensation = when {
+                detections.size >= 8 -> 1.12f
+                detections.size >= 5 -> 1.06f
+                else -> 1f
+            }
+
+            val adaptiveTargetSubjectSize = (baseTargetSubjectSize * crowdCompensation * edgeCompensation)
+                .coerceIn(0.44f, 0.74f)
+
+            val targetZoom = (adaptiveTargetSubjectSize / subjectHeight).coerceIn(MIN_ZOOM, MAX_ZOOM)
+
+            val handMotion = deviceMotionEstimator.angularSpeed()
+            val motionFactor = when {
+                handMotion <= LOW_HAND_MOTION -> 1.12f
+                handMotion >= HIGH_HAND_MOTION -> 0.55f
+                else -> 1.12f - ((handMotion - LOW_HAND_MOTION) / (HIGH_HAND_MOTION - LOW_HAND_MOTION)) * 0.57f
+            }
+
+            val adaptiveSmoothing = (BASE_ZOOM_SMOOTHING * motionFactor).coerceIn(0.18f, 0.42f)
+            val smoothedZoom = currentZoomRatio + (targetZoom - currentZoomRatio) * adaptiveSmoothing
             applyZoom(smoothedZoom)
             return
         }
@@ -171,7 +230,26 @@ class CameraManager(
         activeCamera?.cameraControl?.setZoomRatio(clamped)
     }
 
-    // --- Grabacion ---
+    private fun enableDeviceStabilization() {
+        val camera = activeCamera ?: return
+        try {
+            val options = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+                .setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+                .build()
+
+            Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options)
+        } catch (e: Exception) {
+            // Algunos dispositivos no soportan ambos modos a la vez.
+            e.printStackTrace()
+        }
+    }
 
     fun startRecording(
         onRecordingStarted: () -> Unit = {},
@@ -229,10 +307,9 @@ class CameraManager(
             .build()
     }
 
-    // --- Lifecycle ---
-
     fun shutdown() {
         personDetector.close()
+        deviceMotionEstimator.stop()
         analysisExecutor.shutdown()
         cameraProvider?.unbindAll()
     }

@@ -110,7 +110,13 @@ class MainActivity : AppCompatActivity() {
 
                 runOnUiThread {
                     trackingOverlay.update(tracker.state, cropBox)
-                    cameraManager.updateAutoFraming(tracker.state, cropBox)
+                    cameraManager.updateAutoFraming(
+                        state = tracker.state,
+                        trackedBox = cropBox,
+                        detections = detections,
+                        viewWidth = previewView.width,
+                        viewHeight = previewView.height
+                    )
                 }
             }
         )
@@ -134,7 +140,13 @@ class MainActivity : AppCompatActivity() {
                 tracker.onTap(PointF(normalizedX, normalizedY), detections, frame)
                 val cropBox = tracker.cropBox
                 trackingOverlay.update(tracker.state, cropBox)
-                cameraManager.updateAutoFraming(tracker.state, cropBox)
+                cameraManager.updateAutoFraming(
+                    state = tracker.state,
+                    trackedBox = cropBox,
+                    detections = detections,
+                    viewWidth = previewView.width,
+                    viewHeight = previewView.height
+                )
             }
 
             true
