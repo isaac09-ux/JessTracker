@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /**
  * SubjectTracker — el cerebro del tracker.
@@ -17,7 +18,8 @@ import kotlin.math.abs
 class SubjectTracker {
 
     companion object {
-        private const val MAX_CENTER_DISTANCE_FOR_TAP = 0.18f
+        private const val MAX_REFERENCE_DISTANCE_FOR_TAP = 0.22f
+        private const val TAP_INSIDE_BONUS = 0.35f
     }
 
     // --- Estado publico ---
@@ -198,8 +200,16 @@ class SubjectTracker {
         if (detections.isEmpty()) return null
 
         return detections
-            .map { box -> Pair(box, normalizedCenterDistance(tapPoint, box)) }
-            .filter { (_, distance) -> distance <= MAX_CENTER_DISTANCE_FOR_TAP }
+            .map { box ->
+                val distance = minReferenceDistance(tapPoint, box)
+                val scoredDistance = if (box.contains(tapPoint.x, tapPoint.y)) {
+                    (distance - TAP_INSIDE_BONUS).coerceAtLeast(0f)
+                } else {
+                    distance
+                }
+                Pair(box, scoredDistance)
+            }
+            .filter { (_, distance) -> distance <= MAX_REFERENCE_DISTANCE_FOR_TAP }
             .minByOrNull { (_, distance) -> distance }
             ?.first
     }
@@ -228,7 +238,7 @@ class SubjectTracker {
 
                 Pair(box, score)
             }
-            .filter { (_, score) -> score >= 0.42f }
+            .filter { (_, score) -> score >= 0.37f }
             .maxByOrNull { (_, score) -> score }
             ?.first
     }
@@ -244,6 +254,36 @@ class SubjectTracker {
         val dx = abs(point.x - centerX)
         val dy = abs(point.y - centerY)
         return (dx + dy) / 2f
+    }
+
+    private fun minReferenceDistance(point: PointF, box: RectF): Float {
+        val points = referencePoints(box)
+        return points.minOf { ref -> euclideanDistance(point, ref) }
+    }
+
+    private fun referencePoints(box: RectF): List<PointF> {
+        val centerX = (box.left + box.right) / 2f
+        val centerY = (box.top + box.bottom) / 2f
+        val quarterY = box.top + box.height() * 0.25f
+        val threeQuarterY = box.top + box.height() * 0.75f
+
+        return listOf(
+            PointF(centerX, centerY),      // centro
+            PointF(centerX, box.top),      // cabeza / parte superior
+            PointF(centerX, box.bottom),   // pies / parte inferior
+            PointF(box.left, centerY),
+            PointF(box.right, centerY),
+            PointF(box.left, quarterY),
+            PointF(box.right, quarterY),
+            PointF(box.left, threeQuarterY),
+            PointF(box.right, threeQuarterY)
+        )
+    }
+
+    private fun euclideanDistance(a: PointF, b: PointF): Float {
+        val dx = a.x - b.x
+        val dy = a.y - b.y
+        return sqrt(dx * dx + dy * dy)
     }
 
     private fun seedMotion(box: RectF) {
