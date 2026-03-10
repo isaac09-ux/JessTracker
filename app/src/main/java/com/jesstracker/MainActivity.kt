@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.PointF
 import android.graphics.RectF
 import android.os.Bundle
+import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -16,36 +17,36 @@ import com.jesstracker.ui.CameraPreviewView
 import com.jesstracker.ui.TrackingOverlay
 
 /**
- * MainActivity — conecta todos los módulos.
+ * MainActivity — conecta todos los modulos.
  *
  * Flujo:
- *   1. Solicitar permisos (cámara + micrófono + storage)
+ *   1. Solicitar permisos (camara + microfono)
  *   2. Inicializar CameraManager con CameraPreviewView
- *   3. CameraManager → frame → SubjectTracker.update()
- *   4. SubjectTracker → cropBox → TrackingOverlay.update()
- *   5. Usuario toca CameraPreviewView → SubjectTracker.onTap()
- *   6. Botón REC → CameraManager.startRecording() / stopRecording()
+ *   3. CameraManager -> frame -> SubjectTracker.update()
+ *   4. SubjectTracker -> cropBox -> TrackingOverlay.update()
+ *   5. Usuario toca CameraPreviewView -> SubjectTracker.onTap()
+ *   6. Boton REC -> CameraManager.startRecording() / stopRecording()
  */
 class MainActivity : AppCompatActivity() {
 
-    // ─── Views ────────────────────────────────────────────────────────────────
+    // --- Views ---
 
     private lateinit var previewView: CameraPreviewView
     private lateinit var trackingOverlay: TrackingOverlay
 
-    // ─── Core modules ─────────────────────────────────────────────────────────
+    // --- Core modules ---
 
     private val tracker = SubjectTracker()
     private lateinit var cameraManager: CameraManager
 
-    // ─── Permisos ─────────────────────────────────────────────────────────────
+    // --- Permisos ---
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (allGranted) startCamera()
-        else Toast.makeText(this, "Se necesitan permisos de cámara", Toast.LENGTH_LONG).show()
+        else Toast.makeText(this, "Se necesitan permisos de camara", Toast.LENGTH_LONG).show()
     }
 
     private val requiredPermissions = arrayOf(
@@ -53,7 +54,7 @@ class MainActivity : AppCompatActivity() {
         Manifest.permission.RECORD_AUDIO
     )
 
-    // ─── Lifecycle ────────────────────────────────────────────────────────────
+    // --- Lifecycle ---
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,10 +70,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        cameraManager.shutdown()
+        if (::cameraManager.isInitialized) {
+            cameraManager.shutdown()
+        }
     }
 
-    // ─── Setup ───────────────────────────────────────────────────────────────
+    // --- Setup ---
 
     private fun checkPermissions() {
         val allGranted = requiredPermissions.all {
@@ -86,24 +89,13 @@ class MainActivity : AppCompatActivity() {
         cameraManager = CameraManager(
             context = this,
             lifecycleOwner = this,
-            tracker = tracker,
-            onFrameProcessed = { cropBox, state ->
-                // Actualizar overlay en el hilo principal
-                runOnUiThread {
-                    trackingOverlay.update(
-                        TrackerState.valueOf(state),
-                        cropBox
-                    )
-                }
-            }
+            tracker = tracker
         )
 
         cameraManager.setup(
             previewView = previewView,
             onDetections = { detections, frame ->
-                // SubjectTracker corre en el hilo de análisis (no bloquea UI)
                 val cropBox = tracker.update(detections, frame)
-                val state = tracker.state.name
 
                 runOnUiThread {
                     trackingOverlay.update(tracker.state, cropBox)
@@ -114,8 +106,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupTouchListener() {
         previewView.onSubjectSelected = { normalizedPoint: PointF ->
-            // Necesitamos las detecciones actuales para saber qué tocó el usuario
-            // Por ahora registramos el tap — PersonDetector lo completará
             Toast.makeText(this, "Sujeto seleccionado", Toast.LENGTH_SHORT).show()
         }
 
@@ -125,18 +115,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupRecordButton() {
-        findViewById<android.widget.Button>(R.id.btnRecord).setOnClickListener {
+        val btnRecord = findViewById<Button>(R.id.btnRecord)
+        btnRecord.setOnClickListener {
             if (cameraManager.isRecording) {
                 cameraManager.stopRecording()
-                (it as android.widget.Button).text = "● REC"
+                btnRecord.text = "\u25CF REC"
             } else {
                 cameraManager.startRecording(
                     onRecordingStarted = {
-                        (it as android.widget.Button).text = "■ STOP"
-                        Toast.makeText(this, "Grabando en 4K...", Toast.LENGTH_SHORT).show()
+                        runOnUiThread {
+                            btnRecord.text = "\u25A0 STOP"
+                            Toast.makeText(this, "Grabando en 4K...", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onRecordingError = { error ->
-                        Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+                        runOnUiThread {
+                            Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+                        }
                     }
                 )
             }

@@ -59,18 +59,32 @@ VideoCapture (saves result)
 ## Project Structure
 
 ```
-app/src/main/java/com/jesstracker/
-├── tracking/
-│   ├── SubjectIdentity.kt      # Visual fingerprint of the selected subject
-│   ├── EmbeddingExtractor.kt   # HSV histogram embedding (96-dim vector)
-│   ├── SubjectTracker.kt       # State machine: tracking → lost → re-id
-│   └── SmoothingFilter.kt      # EMA filter for stable crop movement
-├── camera/
-│   └── CameraManager.kt        # CameraX setup and frame pipeline
-├── ui/
-│   ├── CameraPreviewView.kt    # SurfaceView + touch listener
-│   └── TrackingOverlay.kt      # Bounding box + crop visualization
-└── MainActivity.kt
+JessTracker/
+├── build.gradle                  # Project-level Gradle config
+├── settings.gradle               # Module declarations
+├── gradle.properties             # JVM and AndroidX config
+├── gradlew                       # Gradle wrapper script
+├── gradle/wrapper/
+│   └── gradle-wrapper.properties
+└── app/
+    ├── build.gradle              # App-level dependencies
+    └── src/main/
+        ├── AndroidManifest.xml
+        ├── res/layout/
+        │   └── activity_main.xml
+        └── java/com/jesstracker/
+            ├── MainActivity.kt
+            ├── camera/
+            │   ├── CameraManager.kt    # CameraX setup and frame pipeline
+            │   └── PersonDetector.kt   # MediaPipe object detection wrapper
+            ├── tracking/
+            │   ├── SubjectIdentity.kt  # Visual fingerprint of the selected subject
+            │   ├── EmbeddingExtractor.kt # HSV histogram embedding (96-dim vector)
+            │   ├── SubjectTracker.kt   # State machine: tracking -> lost -> re-id
+            │   └── SmoothingFilter.kt  # EMA filter for stable crop movement
+            └── ui/
+                ├── CameraPreviewView.kt # PreviewView + touch listener
+                └── TrackingOverlay.kt   # Bounding box + crop visualization
 ```
 
 ---
@@ -79,11 +93,11 @@ app/src/main/java/com/jesstracker/
 
 - [x] SubjectIdentity data structure
 - [x] HSV embedding extractor
-- [ ] SubjectTracker state machine
-- [ ] EMA smoothing filter
-- [ ] CameraX integration
-- [ ] Touch-to-select UI
-- [ ] Dynamic crop + recording
+- [x] SubjectTracker state machine
+- [x] EMA smoothing filter
+- [x] CameraX integration
+- [x] Touch-to-select UI
+- [x] Dynamic crop + recording
 - [ ] MobileNetV3 deep embedding (stronger re-ID)
 - [ ] Multi-subject tracking
 - [ ] Jump detection + auto slow-mo
