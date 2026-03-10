@@ -9,6 +9,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult
+import android.util.Log
 import java.util.Locale
 
 /**
@@ -23,9 +24,10 @@ import java.util.Locale
 class PersonDetector(private val context: Context) {
 
     companion object {
+        private const val TAG = "PersonDetector"
         private const val MODEL_NAME = "efficientdet_lite0.tflite"
-        private const val MIN_CONFIDENCE = 0.32f
-        private const val MAX_RESULTS = 14
+        private const val MIN_CONFIDENCE = 0.28f
+        private const val MAX_RESULTS = 20
 
         // Permite detectar jugadores/objetos lejanos (gradas / fondo de cancha).
         private const val MIN_NORMALIZED_HEIGHT = 0.012f
@@ -43,12 +45,41 @@ class PersonDetector(private val context: Context) {
 
     private var detector: ObjectDetector? = null
 
+    @Volatile
+    var isInitialized: Boolean = false
+        private set
+
+    var initializationError: String? = null
+        private set
+
     // --- Inicializacion ---
 
     fun initialize() {
+        // Intentar GPU primero; si falla, caer a CPU.
+        try {
+            detector = createDetector(Delegate.GPU)
+            isInitialized = true
+            Log.i(TAG, "Inicializado con GPU")
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "GPU no disponible, intentando CPU: ${e.message}")
+        }
+
+        try {
+            detector = createDetector(Delegate.CPU)
+            isInitialized = true
+            Log.i(TAG, "Inicializado con CPU")
+        } catch (e: Exception) {
+            Log.e(TAG, "No se pudo inicializar el detector: ${e.message}", e)
+            initializationError = e.message
+            isInitialized = false
+        }
+    }
+
+    private fun createDetector(delegate: Delegate): ObjectDetector {
         val baseOptions = BaseOptions.builder()
             .setModelAssetPath(MODEL_NAME)
-            .setDelegate(Delegate.GPU)
+            .setDelegate(delegate)
             .build()
 
         val options = ObjectDetector.ObjectDetectorOptions.builder()
@@ -58,7 +89,7 @@ class PersonDetector(private val context: Context) {
             .setMaxResults(MAX_RESULTS)
             .build()
 
-        detector = ObjectDetector.createFromOptions(context, options)
+        return ObjectDetector.createFromOptions(context, options)
     }
 
     // --- Deteccion ---
@@ -66,19 +97,24 @@ class PersonDetector(private val context: Context) {
     fun detect(frame: Bitmap): List<RectF> {
         val det = detector ?: return emptyList()
 
-        val mpImage = BitmapImageBuilder(frame).build()
-        val result: ObjectDetectorResult = det.detect(mpImage)
+        return try {
+            val mpImage = BitmapImageBuilder(frame).build()
+            val result: ObjectDetectorResult = det.detect(mpImage)
 
-        return result.detections()
-            .filter { detection ->
-                detection.categories().any { category ->
-                    val label = category.categoryName().orEmpty().lowercase(Locale.US)
-                    label in TRACKABLE_LABELS && category.score() >= MIN_CONFIDENCE
+            result.detections()
+                .filter { detection ->
+                    detection.categories().any { category ->
+                        val label = category.categoryName().orEmpty().lowercase(Locale.US)
+                        label in TRACKABLE_LABELS && category.score() >= MIN_CONFIDENCE
+                    }
                 }
-            }
-            .mapNotNull { detection ->
-                normalizeBox(detection.boundingBox(), frame.width, frame.height)
-            }
+                .mapNotNull { detection ->
+                    normalizeBox(detection.boundingBox(), frame.width, frame.height)
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en deteccion: ${e.message}")
+            emptyList()
+        }
     }
 
     // --- Helpers ---

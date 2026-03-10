@@ -25,10 +25,16 @@ class SubjectIdentity(
     val framesLost: Int = 0
 ) {
     companion object {
-        const val SIMILARITY_THRESHOLD = 0.85f
-        const val MAX_FRAMES_LOST = 180
+        const val SIMILARITY_THRESHOLD = 0.82f
+        const val MAX_FRAMES_LOST = 300
         const val PATCH_WIDTH = 64
         const val PATCH_HEIGHT = 128
+
+        // Decay por etapas: rapido al principio (el sujeto probablemente sigue cerca),
+        // lento despues (dar tiempo para re-ID si se fue detras de alguien).
+        private const val FAST_DECAY = 0.97f
+        private const val SLOW_DECAY = 0.995f
+        private const val FAST_DECAY_FRAMES = 30
     }
 
     fun cosineSimilarity(other: FloatArray): Float {
@@ -55,10 +61,13 @@ class SubjectIdentity(
 
     fun isExpired(): Boolean = framesLost >= MAX_FRAMES_LOST
 
-    fun incrementLost(): SubjectIdentity = copy(
-        framesLost = framesLost + 1,
-        confidence = confidence * 0.98f
-    )
+    fun incrementLost(): SubjectIdentity {
+        val decay = if (framesLost < FAST_DECAY_FRAMES) FAST_DECAY else SLOW_DECAY
+        return copy(
+            framesLost = framesLost + 1,
+            confidence = confidence * decay
+        )
+    }
 
     fun copy(
         embedding: FloatArray = this.embedding,
