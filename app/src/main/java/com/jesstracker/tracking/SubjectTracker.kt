@@ -24,15 +24,15 @@ class SubjectTracker {
 
         // Peso del aspect ratio en el score de re-identificacion.
         private const val SIZE_SIMILARITY_WEIGHT = 0.12f
-        private const val EMBEDDING_WEIGHT_TRACKING = 0.75f
-        private const val PROXIMITY_WEIGHT_TRACKING = 0.25f
+        private const val EMBEDDING_WEIGHT_TRACKING = 0.82f
+        private const val PROXIMITY_WEIGHT_TRACKING = 0.18f
         private const val EMBEDDING_WEIGHT_REID = 0.72f
         private const val PROXIMITY_WEIGHT_REID = 0.16f
 
-        // Umbral minimo de IoU para considerar "mismo objeto" sin embedding.
-        private const val IOU_FAST_MATCH_THRESHOLD = 0.10f
+        // Umbral de IoU para modular la penalizacion por proximidad en tracking continuo.
+        private const val IOU_FAST_MATCH_THRESHOLD = 0.35f
         // Score minimo para aceptar un candidato en tracking continuo.
-        private const val TRACKING_MATCH_THRESHOLD = 0.37f
+        private const val TRACKING_MATCH_THRESHOLD = 0.52f
 
         // Cuantos frames de velocidad reciente guardar para prediccion suavizada.
         private const val VELOCITY_HISTORY_SIZE = 5
@@ -312,18 +312,19 @@ class SubjectTracker {
                 val centerDistance = normalizedCenterDistance(predictedBox, box)
                 val sizeSim = computeSizeSimilarity(box)
 
-                val score = if (iou >= IOU_FAST_MATCH_THRESHOLD) {
-                    // IoU alto = casi seguro es el mismo objeto; ponderar con tamano.
-                    iou * EMBEDDING_WEIGHT_TRACKING +
-                        (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING * 0.32f +
-                        sizeSim * SIZE_SIMILARITY_WEIGHT
+                // Siempre validar embedding para evitar saltos de lock entre sujetos.
+                val embedding = embeddingExtractor.extract(frame, box)
+                val similarity = currentIdentity.cosineSimilarity(embedding)
+
+                val proximityTerm = if (iou >= IOU_FAST_MATCH_THRESHOLD) {
+                    (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING * 0.32f
                 } else {
-                    // IoU bajo = necesitamos embedding para decidir.
-                    val embedding = embeddingExtractor.extract(frame, box)
-                    val similarity = currentIdentity.cosineSimilarity(embedding)
-                    similarity * EMBEDDING_WEIGHT_TRACKING +
-                        (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING
+                    (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING
                 }
+
+                val score = similarity * EMBEDDING_WEIGHT_TRACKING +
+                    proximityTerm +
+                    sizeSim * SIZE_SIMILARITY_WEIGHT
 
                 Pair(box, score)
             }
