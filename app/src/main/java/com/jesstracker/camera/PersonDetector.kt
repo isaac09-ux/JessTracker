@@ -9,11 +9,12 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult
+import java.util.Locale
 
 /**
  * PersonDetector — wrapper de MediaPipe Object Detection.
  *
- * Detecta personas en cada frame y devuelve sus bounding boxes
+ * Detecta personas y vehiculos en cada frame y devuelve sus bounding boxes
  * como coordenadas normalizadas (0.0 - 1.0).
  *
  * Modelo usado: efficientdet_lite0 — el mas rapido de MediaPipe,
@@ -23,9 +24,21 @@ class PersonDetector(private val context: Context) {
 
     companion object {
         private const val MODEL_NAME = "efficientdet_lite0.tflite"
-        private const val PERSON_LABEL = "person"
-        private const val MIN_CONFIDENCE = 0.45f
-        private const val MAX_RESULTS = 8
+        private const val MIN_CONFIDENCE = 0.32f
+        private const val MAX_RESULTS = 14
+
+        // Permite detectar jugadores/objetos lejanos (gradas / fondo de cancha).
+        private const val MIN_NORMALIZED_HEIGHT = 0.012f
+        private const val MIN_NORMALIZED_WIDTH = 0.004f
+
+        private val TRACKABLE_LABELS = setOf(
+            "person",
+            "car",
+            "truck",
+            "bus",
+            "motorcycle",
+            "bicycle"
+        )
     }
 
     private var detector: ObjectDetector? = null
@@ -59,29 +72,28 @@ class PersonDetector(private val context: Context) {
         return result.detections()
             .filter { detection ->
                 detection.categories().any { category ->
-                    category.categoryName() == PERSON_LABEL &&
-                    category.score() >= MIN_CONFIDENCE
+                    val label = category.categoryName().orEmpty().lowercase(Locale.US)
+                    label in TRACKABLE_LABELS && category.score() >= MIN_CONFIDENCE
                 }
             }
             .mapNotNull { detection ->
-                val boundingBox = detection.boundingBox()
-                normalizeBox(boundingBox, frame.width, frame.height)
+                normalizeBox(detection.boundingBox(), frame.width, frame.height)
             }
     }
 
     // --- Helpers ---
 
     private fun normalizeBox(box: android.graphics.Rect, frameW: Int, frameH: Int): RectF? {
-        val left   = box.left.toFloat()   / frameW
-        val top    = box.top.toFloat()    / frameH
-        val right  = box.right.toFloat()  / frameW
+        val left = box.left.toFloat() / frameW
+        val top = box.top.toFloat() / frameH
+        val right = box.right.toFloat() / frameW
         val bottom = box.bottom.toFloat() / frameH
 
         if (left >= 1f || top >= 1f || right <= 0f || bottom <= 0f) return null
 
         val height = bottom - top
-        val width  = right - left
-        if (height < 0.03f || width < 0.01f) return null
+        val width = right - left
+        if (height < MIN_NORMALIZED_HEIGHT || width < MIN_NORMALIZED_WIDTH) return null
 
         return RectF(
             left.coerceIn(0f, 1f),
