@@ -233,16 +233,17 @@ class SubjectTracker {
             return cropBox
         }
 
-        val (foundBox, combinedScore, _) = bestCandidate
+        val (foundBox, combinedScore, foundEmbedding) = bestCandidate
 
+        // Reutilizamos el embedding ya calculado durante el scoring; solo re-cropeamos
+        // para obtener el Bitmap que guarda SubjectIdentity (es barato vs extractFromPatch).
         val patch = embeddingExtractor.cropPatch(frame, foundBox)
-        val newEmbedding = embeddingExtractor.extractFromPatch(patch)
 
         embeddingBuffer.clear()
-        repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(newEmbedding.copyOf()) }
+        repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(foundEmbedding.copyOf()) }
 
         identity = currentIdentity.copy(
-            embedding = newEmbedding,
+            embedding = foundEmbedding,
             lastKnownBox = RectF(foundBox),
             lastKnownPatch = patch,
             confidence = combinedScore,
@@ -313,7 +314,9 @@ class SubjectTracker {
 
                 val score = if (iou >= IOU_FAST_MATCH_THRESHOLD) {
                     // IoU alto = casi seguro es el mismo objeto; ponderar con tamano.
-                    iou * 0.82f + (1f - centerDistance) * 0.08f + sizeSim * 0.10f
+                    iou * EMBEDDING_WEIGHT_TRACKING +
+                        (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING * 0.32f +
+                        sizeSim * SIZE_SIMILARITY_WEIGHT
                 } else {
                     // IoU bajo = necesitamos embedding para decidir.
                     val embedding = embeddingExtractor.extract(frame, box)

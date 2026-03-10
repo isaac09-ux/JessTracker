@@ -107,8 +107,7 @@ class MainActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (::cameraManager.isInitialized) {
-            val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
-            cameraManager.setTargetRotation(rotation)
+            cameraManager.setTargetRotation(getDisplayRotation())
         }
     }
 
@@ -155,14 +154,22 @@ class MainActivity : AppCompatActivity() {
         else permissionLauncher.launch(requiredPermissions)
     }
 
+    private fun getDisplayRotation(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: Surface.ROTATION_0
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
+    }
+
     private fun startCamera() {
         cameraManager = CameraManager(
             context = this,
             lifecycleOwner = this
         )
 
-        val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
-        cameraManager.setTargetRotation(rotation)
+        cameraManager.setTargetRotation(getDisplayRotation())
 
         cameraManager.setup(
             previewView = previewView,

@@ -119,11 +119,11 @@ class PersonDetector(private val context: Context) {
 
     // --- Helpers ---
 
-    private fun normalizeBox(box: android.graphics.Rect, frameW: Int, frameH: Int): RectF? {
-        val left = box.left.toFloat() / frameW
-        val top = box.top.toFloat() / frameH
-        val right = box.right.toFloat() / frameW
-        val bottom = box.bottom.toFloat() / frameH
+    private fun normalizeBox(box: RectF, frameW: Int, frameH: Int): RectF? {
+        val left = box.left / frameW
+        val top = box.top / frameH
+        val right = box.right / frameW
+        val bottom = box.bottom / frameH
 
         if (left >= 1f || top >= 1f || right <= 0f || bottom <= 0f) return null
 
