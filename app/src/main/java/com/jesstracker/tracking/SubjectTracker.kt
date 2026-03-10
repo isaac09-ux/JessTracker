@@ -21,6 +21,8 @@ class SubjectTracker {
         private const val MAX_REFERENCE_DISTANCE_FOR_TAP = 0.22f
         private const val TAP_INSIDE_BONUS = 0.35f
         private const val EMBEDDING_BUFFER_SIZE = 4
+        private const val ANCHOR_BLEND_WEIGHT = 0.38f
+        private const val EMBEDDING_UPDATE_SIMILARITY_GATE = 0.86f
 
         // Peso del aspect ratio en el score de re-identificacion.
         private const val SIZE_SIMILARITY_WEIGHT = 0.12f
@@ -55,6 +57,7 @@ class SubjectTracker {
     private val smoothingFilter = SmoothingFilter()
 
     private val embeddingBuffer = mutableListOf<FloatArray>()
+    private var anchorEmbedding: FloatArray? = null
 
     private var lastCenterX: Float? = null
     private var lastCenterY: Float? = null
@@ -82,6 +85,7 @@ class SubjectTracker {
         embeddingBuffer.clear()
         // Sembramos el buffer para que la identidad quede estable desde el primer frame.
         repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(embedding.copyOf()) }
+        anchorEmbedding = embedding.copyOf()
 
         identity = SubjectIdentity(
             embedding = embedding,
@@ -116,6 +120,7 @@ class SubjectTracker {
         cropBox = null
         identity = null
         embeddingBuffer.clear()
+        anchorEmbedding = null
         smoothingFilter.reset(null)
         lastCenterX = null
         lastCenterY = null
@@ -142,26 +147,28 @@ class SubjectTracker {
             return cropBox
         }
 
-        updateMotion(bestMatch)
+        updateMotion(bestMatch.box)
 
-        val patch = embeddingExtractor.cropPatch(frame, bestMatch)
-        val embedding = embeddingExtractor.extractFromPatch(patch)
-        addToEmbeddingBuffer(embedding)
+        val patch = embeddingExtractor.cropPatch(frame, bestMatch.box)
+
+        if (shouldUpdateEmbeddingBuffer(currentIdentity, bestMatch.embedding)) {
+            addToEmbeddingBuffer(bestMatch.embedding)
+        }
 
         // Actualizar referencia de tamano con EMA para adaptarse a cambios de distancia.
-        referenceHeight = referenceHeight * 0.9f + bestMatch.height() * 0.1f
+        referenceHeight = referenceHeight * 0.9f + bestMatch.box.height() * 0.1f
         referenceAspectRatio = referenceAspectRatio * 0.9f +
-            (bestMatch.width() / bestMatch.height().coerceAtLeast(0.001f)) * 0.1f
+            (bestMatch.box.width() / bestMatch.box.height().coerceAtLeast(0.001f)) * 0.1f
 
         identity = currentIdentity.copy(
-            embedding = averageEmbedding(),
-            lastKnownBox = RectF(bestMatch),
+            embedding = blendedIdentityEmbedding(),
+            lastKnownBox = RectF(bestMatch.box),
             lastKnownPatch = patch,
             confidence = 1.0f,
             framesLost = 0
         )
 
-        val smoothed = smoothingFilter.update(bestMatch)
+        val smoothed = smoothingFilter.update(bestMatch.box)
         cropBox = smoothed
         return smoothed
     }
@@ -203,7 +210,7 @@ class SubjectTracker {
         val bestCandidate = detections
             .map { box ->
                 val embedding = embeddingExtractor.extract(frame, box)
-                val similarity = currentIdentity.cosineSimilarity(embedding)
+                val similarity = robustSimilarity(currentIdentity, embedding)
 
                 // Proximidad a la ultima posicion conocida (o predicha por velocidad).
                 val predictedPos = predictNextBox(lastKnown)
@@ -221,7 +228,7 @@ class SubjectTracker {
                 val combinedScore = similarity * EMBEDDING_WEIGHT_REID +
                     proximity * PROXIMITY_WEIGHT_REID +
                     sizeSimilarity * SIZE_SIMILARITY_WEIGHT
-                Triple(box, combinedScore, embedding)
+                ReIdCandidate(box, combinedScore, embedding)
             }
             .filter { (_, score, _) ->
                 score >= SubjectIdentity.SIMILARITY_THRESHOLD
@@ -243,7 +250,7 @@ class SubjectTracker {
         repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(foundEmbedding.copyOf()) }
 
         identity = currentIdentity.copy(
-            embedding = foundEmbedding,
+            embedding = blendedIdentityEmbedding(),
             lastKnownBox = RectF(foundBox),
             lastKnownPatch = patch,
             confidence = combinedScore,
@@ -301,7 +308,7 @@ class SubjectTracker {
         currentIdentity: SubjectIdentity,
         candidates: List<RectF>,
         frame: Bitmap
-    ): RectF? {
+    ): TrackingMatch? {
         if (candidates.isEmpty()) return null
 
         val predictedBox = predictNextBox(currentIdentity.lastKnownBox)
@@ -314,7 +321,7 @@ class SubjectTracker {
 
                 // Siempre validar embedding para evitar saltos de lock entre sujetos.
                 val embedding = embeddingExtractor.extract(frame, box)
-                val similarity = currentIdentity.cosineSimilarity(embedding)
+                val similarity = robustSimilarity(currentIdentity, embedding)
 
                 val proximityTerm = if (iou >= IOU_FAST_MATCH_THRESHOLD) {
                     (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING * 0.32f
@@ -326,11 +333,21 @@ class SubjectTracker {
                     proximityTerm +
                     sizeSim * SIZE_SIMILARITY_WEIGHT
 
-                Pair(box, score)
+                TrackingMatch(box, score, embedding)
             }
-            .filter { (_, score) -> score >= TRACKING_MATCH_THRESHOLD }
-            .maxByOrNull { (_, score) -> score }
-            ?.first
+            .filter { match -> match.score >= TRACKING_MATCH_THRESHOLD }
+            .maxByOrNull { match -> match.score }
+    }
+
+    private fun robustSimilarity(currentIdentity: SubjectIdentity, candidateEmbedding: FloatArray): Float {
+        val anchorSimilarity = anchorEmbedding?.let { cosineSimilarity(it, candidateEmbedding) } ?: 0f
+        val currentSimilarity = currentIdentity.cosineSimilarity(candidateEmbedding)
+        return maxOf(currentSimilarity, anchorSimilarity)
+    }
+
+    private fun shouldUpdateEmbeddingBuffer(currentIdentity: SubjectIdentity, candidateEmbedding: FloatArray): Boolean {
+        val similarity = robustSimilarity(currentIdentity, candidateEmbedding)
+        return similarity >= EMBEDDING_UPDATE_SIMILARITY_GATE
     }
 
     private fun normalizedCenterDistance(reference: RectF, box: RectF): Float {
@@ -455,7 +472,45 @@ class SubjectTracker {
         val count = embeddingBuffer.size.toFloat()
         return FloatArray(size) { result[it] / count }
     }
+
+    private fun blendedIdentityEmbedding(): FloatArray {
+        val averaged = averageEmbedding()
+        val anchor = anchorEmbedding ?: return averaged
+        return FloatArray(averaged.size) { i ->
+            averaged[i] * (1f - ANCHOR_BLEND_WEIGHT) + anchor[i] * ANCHOR_BLEND_WEIGHT
+        }
+    }
+
+    private fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
+        require(a.size == b.size) { "Embeddings de distinto tamano: ${a.size} vs ${b.size}" }
+
+        var dotProduct = 0f
+        var normA = 0f
+        var normB = 0f
+
+        for (i in a.indices) {
+            dotProduct += a[i] * b[i]
+            normA += a[i] * a[i]
+            normB += b[i] * b[i]
+        }
+
+        if (normA == 0f || normB == 0f) return 0f
+
+        return dotProduct / (sqrt(normA) * sqrt(normB))
+    }
 }
+
+private data class TrackingMatch(
+    val box: RectF,
+    val score: Float,
+    val embedding: FloatArray
+)
+
+private data class ReIdCandidate(
+    val box: RectF,
+    val score: Float,
+    val embedding: FloatArray
+)
 
 /**
  * Estados posibles del tracker.
