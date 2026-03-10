@@ -2,11 +2,15 @@ package com.jesstracker.camera
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.hardware.camera2.CaptureRequest
+import android.os.BatteryManager
 import android.provider.MediaStore
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -47,6 +51,8 @@ class CameraManager(
 ) {
 
     companion object {
+        private const val TAG = "CameraManager"
+
         private const val PORTRAIT_TARGET_SUBJECT_HEIGHT = 0.66f
         private const val LANDSCAPE_TARGET_SUBJECT_HEIGHT = 0.52f
         private const val MIN_ZOOM = 1.0f
@@ -61,6 +67,11 @@ class CameraManager(
         // Seguimiento de enfoque / metering para acercarnos al "auto framing" tipo Samsung.
         private const val METERING_UPDATE_INTERVAL_MS = 350L
         private const val MAX_CENTER_BIAS = 0.10f
+
+        // Throttling adaptativo segun bateria.
+        private const val BATTERY_CHECK_INTERVAL_MS = 30_000L
+        private const val LOW_BATTERY_THRESHOLD = 20
+        private const val MEDIUM_BATTERY_THRESHOLD = 40
     }
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -78,6 +89,11 @@ class CameraManager(
     private var currentZoomRatio: Float = MIN_ZOOM
     private var targetRotation: Int = Surface.ROTATION_0
     private var lastMeteringUpdateAtMs: Long = 0L
+
+    // Throttling: saltar N frames entre detecciones para ahorrar bateria.
+    private var frameSkipInterval: Int = 0
+    private var frameCounter: Int = 0
+    private var lastBatteryCheckMs: Long = 0L
 
     var isRecording: Boolean = false
         private set
@@ -167,7 +183,7 @@ class CameraManager(
             currentZoomRatio = MIN_ZOOM
             enableDeviceStabilization()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error binding use cases", e)
         }
     }
 
@@ -176,6 +192,13 @@ class CameraManager(
         onDetections: (List<RectF>, Bitmap) -> Unit
     ) {
         try {
+            // Throttling adaptativo: saltar frames cuando bateria baja.
+            updateThrottling()
+            frameCounter++
+            if (frameSkipInterval > 0 && frameCounter % (frameSkipInterval + 1) != 0) {
+                return
+            }
+
             val bitmap = imageProxy.toBitmap()
             val degrees = imageProxy.imageInfo.rotationDegrees.toFloat()
             val rotatedBitmap = rotateBitmap(bitmap, degrees)
@@ -190,6 +213,30 @@ class CameraManager(
         } finally {
             imageProxy.close()
         }
+    }
+
+    private fun updateThrottling() {
+        val now = System.currentTimeMillis()
+        if (now - lastBatteryCheckMs < BATTERY_CHECK_INTERVAL_MS) return
+        lastBatteryCheckMs = now
+
+        val batteryLevel = getBatteryLevel()
+        frameSkipInterval = when {
+            batteryLevel <= LOW_BATTERY_THRESHOLD -> 2   // Procesar 1 de cada 3 frames
+            batteryLevel <= MEDIUM_BATTERY_THRESHOLD -> 1 // Procesar 1 de cada 2 frames
+            else -> 0                                     // Procesar todos los frames
+        }
+
+        if (frameSkipInterval > 0) {
+            Log.i(TAG, "Bateria $batteryLevel%, throttling: skip $frameSkipInterval frames")
+        }
+    }
+
+    private fun getBatteryLevel(): Int {
+        val batteryStatus = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level >= 0 && scale > 0) (level * 100 / scale) else 100
     }
 
     private fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
@@ -228,6 +275,7 @@ class CameraManager(
 
             val edgeCompensation = if (distanceToNearestEdge < 0.16f) 0.88f else 1f
             val crowdCompensation = when {
+                detections.size >= 12 -> 1.18f
                 detections.size >= 8 -> 1.12f
                 detections.size >= 5 -> 1.06f
                 else -> 1f
@@ -313,7 +361,7 @@ class CameraManager(
             Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options)
         } catch (e: Exception) {
             // Algunos dispositivos no soportan ambos modos a la vez.
-            e.printStackTrace()
+            Log.w(TAG, "Stabilization modes not fully supported: ${e.message}")
         }
     }
 

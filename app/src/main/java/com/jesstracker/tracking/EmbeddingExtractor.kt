@@ -36,33 +36,39 @@ class EmbeddingExtractor {
             true
         )
 
-        val foregroundMask = buildForegroundMask(resized)
-        val embedding = FloatArray(TOTAL_BINS)
-        val zoneHeight = resized.height / 3
-        val hsv = FloatArray(3)
+        try {
+            val foregroundMask = buildForegroundMask(resized)
+            val embedding = FloatArray(TOTAL_BINS)
+            val zoneHeight = resized.height / 3
+            val hsv = FloatArray(3)
 
-        for (y in 0 until resized.height) {
-            val zone = minOf(y / zoneHeight, 2)
-            val zoneOffset = zone * BINS_PER_ZONE
+            for (y in 0 until resized.height) {
+                val zone = minOf(y / zoneHeight, 2)
+                val zoneOffset = zone * BINS_PER_ZONE
 
-            for (x in 0 until resized.width) {
-                if (!foregroundMask[y * resized.width + x]) continue
+                for (x in 0 until resized.width) {
+                    if (!foregroundMask[y * resized.width + x]) continue
 
-                val pixel = resized.getPixel(x, y)
-                Color.colorToHSV(pixel, hsv)
+                    val pixel = resized.getPixel(x, y)
+                    Color.colorToHSV(pixel, hsv)
 
-                val hue = hsv[0]
-                val saturation = hsv[1]
+                    val hue = hsv[0]
+                    val saturation = hsv[1]
 
-                if (saturation > SATURATION_THRESHOLD) {
-                    val bin = (hue / HUE_RANGE * BINS_PER_ZONE).toInt()
-                        .coerceIn(0, BINS_PER_ZONE - 1)
-                    embedding[zoneOffset + bin]++
+                    if (saturation > SATURATION_THRESHOLD) {
+                        val bin = (hue / HUE_RANGE * BINS_PER_ZONE).toInt()
+                            .coerceIn(0, BINS_PER_ZONE - 1)
+                        embedding[zoneOffset + bin]++
+                    }
                 }
             }
-        }
 
-        return normalizeL1(embedding)
+            return normalizeL1(embedding)
+        } finally {
+            if (resized !== patch) {
+                resized.recycle()
+            }
+        }
     }
 
     fun cropPatch(frame: Bitmap, box: RectF): Bitmap {

@@ -21,6 +21,21 @@ class SubjectTracker {
         private const val MAX_REFERENCE_DISTANCE_FOR_TAP = 0.22f
         private const val TAP_INSIDE_BONUS = 0.35f
         private const val EMBEDDING_BUFFER_SIZE = 4
+
+        // Peso del aspect ratio en el score de re-identificacion.
+        private const val SIZE_SIMILARITY_WEIGHT = 0.12f
+        private const val EMBEDDING_WEIGHT_TRACKING = 0.75f
+        private const val PROXIMITY_WEIGHT_TRACKING = 0.25f
+        private const val EMBEDDING_WEIGHT_REID = 0.72f
+        private const val PROXIMITY_WEIGHT_REID = 0.16f
+
+        // Umbral minimo de IoU para considerar "mismo objeto" sin embedding.
+        private const val IOU_FAST_MATCH_THRESHOLD = 0.10f
+        // Score minimo para aceptar un candidato en tracking continuo.
+        private const val TRACKING_MATCH_THRESHOLD = 0.37f
+
+        // Cuantos frames de velocidad reciente guardar para prediccion suavizada.
+        private const val VELOCITY_HISTORY_SIZE = 5
     }
 
     // --- Estado publico ---
@@ -46,6 +61,16 @@ class SubjectTracker {
     private var velocityX: Float = 0f
     private var velocityY: Float = 0f
 
+    // Historial de velocidades para prediccion suavizada (evita saltos por jitter).
+    private val velocityHistoryX = FloatArray(VELOCITY_HISTORY_SIZE)
+    private val velocityHistoryY = FloatArray(VELOCITY_HISTORY_SIZE)
+    private var velocityIndex = 0
+    private var velocitySamples = 0
+
+    // Aspect ratio del sujeto seleccionado, para filtrar candidatos de tamano muy diferente.
+    private var referenceAspectRatio: Float = 1f
+    private var referenceHeight: Float = 0f
+
     // --- API publica ---
 
     fun onTap(tapPoint: PointF, detections: List<RectF>, frame: Bitmap) {
@@ -65,6 +90,9 @@ class SubjectTracker {
             confidence = 1.0f,
             framesLost = 0
         )
+
+        referenceAspectRatio = tappedBox.width() / tappedBox.height().coerceAtLeast(0.001f)
+        referenceHeight = tappedBox.height()
 
         smoothingFilter.reset(tappedBox)
         seedMotion(tappedBox)
@@ -93,6 +121,10 @@ class SubjectTracker {
         lastCenterY = null
         velocityX = 0f
         velocityY = 0f
+        velocityIndex = 0
+        velocitySamples = 0
+        referenceAspectRatio = 1f
+        referenceHeight = 0f
     }
 
     // --- Logica por estado ---
@@ -112,10 +144,14 @@ class SubjectTracker {
 
         updateMotion(bestMatch)
 
-        // Extraer embedding y patch una sola vez (antes se hacia doble).
         val patch = embeddingExtractor.cropPatch(frame, bestMatch)
         val embedding = embeddingExtractor.extractFromPatch(patch)
         addToEmbeddingBuffer(embedding)
+
+        // Actualizar referencia de tamano con EMA para adaptarse a cambios de distancia.
+        referenceHeight = referenceHeight * 0.9f + bestMatch.height() * 0.1f
+        referenceAspectRatio = referenceAspectRatio * 0.9f +
+            (bestMatch.width() / bestMatch.height().coerceAtLeast(0.001f)) * 0.1f
 
         identity = currentIdentity.copy(
             embedding = averageEmbedding(),
@@ -142,6 +178,10 @@ class SubjectTracker {
 
         identity = currentIdentity.incrementLost()
 
+        // Actualizar cropBox con prediccion de velocidad para que el overlay
+        // siga moviéndose hacia donde iba el sujeto (en vez de congelarse).
+        cropBox = predictNextBox(currentIdentity.lastKnownBox)
+
         if (detections.isEmpty()) return cropBox
 
         state = TrackerState.RE_IDENTIFYING
@@ -165,17 +205,22 @@ class SubjectTracker {
                 val embedding = embeddingExtractor.extract(frame, box)
                 val similarity = currentIdentity.cosineSimilarity(embedding)
 
-                // Usar proximidad a la ultima posicion conocida como factor secundario.
-                // Un jugador que desaparecio probablemente reaparezca cerca de donde estaba.
+                // Proximidad a la ultima posicion conocida (o predicha por velocidad).
+                val predictedPos = predictNextBox(lastKnown)
                 val proximity = 1f - normalizedCenterDistance(
                     PointF(
-                        (lastKnown.left + lastKnown.right) / 2f,
-                        (lastKnown.top + lastKnown.bottom) / 2f
+                        (predictedPos.left + predictedPos.right) / 2f,
+                        (predictedPos.top + predictedPos.bottom) / 2f
                     ),
                     box
                 ).coerceIn(0f, 1f)
 
-                val combinedScore = similarity * 0.80f + proximity * 0.20f
+                // Similitud de tamano: penalizar candidatos de tamano muy diferente.
+                val sizeSimilarity = computeSizeSimilarity(box)
+
+                val combinedScore = similarity * EMBEDDING_WEIGHT_REID +
+                    proximity * PROXIMITY_WEIGHT_REID +
+                    sizeSimilarity * SIZE_SIMILARITY_WEIGHT
                 Triple(box, combinedScore, embedding)
             }
             .filter { (_, score, _) ->
@@ -190,8 +235,6 @@ class SubjectTracker {
 
         val (foundBox, combinedScore, _) = bestCandidate
 
-        // Extraer embedding limpio del patch final (no reusar el de comparacion
-        // porque este viene del resize a PATCH_WIDTH/HEIGHT).
         val patch = embeddingExtractor.cropPatch(frame, foundBox)
         val newEmbedding = embeddingExtractor.extractFromPatch(patch)
 
@@ -215,6 +258,25 @@ class SubjectTracker {
     }
 
     // --- Helpers ---
+
+    private fun computeSizeSimilarity(candidateBox: RectF): Float {
+        val candidateHeight = candidateBox.height().coerceAtLeast(0.001f)
+        val candidateAspect = candidateBox.width() / candidateHeight
+
+        // Ratio entre alturas (1.0 = mismo tamano, <1.0 = diferente).
+        val heightRatio = if (referenceHeight > 0f) {
+            val ratio = candidateHeight / referenceHeight
+            if (ratio > 1f) 1f / ratio else ratio
+        } else 1f
+
+        // Similitud de aspect ratio.
+        val aspectRatio = if (referenceAspectRatio > 0f) {
+            val ratio = candidateAspect / referenceAspectRatio
+            if (ratio > 1f) 1f / ratio else ratio
+        } else 1f
+
+        return (heightRatio * 0.6f + aspectRatio * 0.4f).coerceIn(0f, 1f)
+    }
 
     private fun findTappedDetection(tapPoint: PointF, detections: List<RectF>): RectF? {
         if (detections.isEmpty()) return null
@@ -247,18 +309,22 @@ class SubjectTracker {
             .map { box ->
                 val iou = calculateIoU(predictedBox, box)
                 val centerDistance = normalizedCenterDistance(predictedBox, box)
+                val sizeSim = computeSizeSimilarity(box)
 
-                val score = if (iou >= 0.10f) {
-                    iou * 0.9f + (1f - centerDistance) * 0.1f
+                val score = if (iou >= IOU_FAST_MATCH_THRESHOLD) {
+                    // IoU alto = casi seguro es el mismo objeto; ponderar con tamano.
+                    iou * 0.82f + (1f - centerDistance) * 0.08f + sizeSim * 0.10f
                 } else {
+                    // IoU bajo = necesitamos embedding para decidir.
                     val embedding = embeddingExtractor.extract(frame, box)
                     val similarity = currentIdentity.cosineSimilarity(embedding)
-                    similarity * 0.75f + (1f - centerDistance) * 0.25f
+                    similarity * EMBEDDING_WEIGHT_TRACKING +
+                        (1f - centerDistance) * PROXIMITY_WEIGHT_TRACKING
                 }
 
                 Pair(box, score)
             }
-            .filter { (_, score) -> score >= 0.37f }
+            .filter { (_, score) -> score >= TRACKING_MATCH_THRESHOLD }
             .maxByOrNull { (_, score) -> score }
             ?.first
     }
@@ -311,6 +377,10 @@ class SubjectTracker {
         lastCenterY = (box.top + box.bottom) / 2f
         velocityX = 0f
         velocityY = 0f
+        velocityIndex = 0
+        velocitySamples = 0
+        velocityHistoryX.fill(0f)
+        velocityHistoryY.fill(0f)
     }
 
     private fun updateMotion(box: RectF) {
@@ -320,8 +390,18 @@ class SubjectTracker {
         val previousX = lastCenterX ?: centerX
         val previousY = lastCenterY ?: centerY
 
-        velocityX = centerX - previousX
-        velocityY = centerY - previousY
+        val dx = centerX - previousX
+        val dy = centerY - previousY
+
+        // Guardar en historial circular.
+        velocityHistoryX[velocityIndex % VELOCITY_HISTORY_SIZE] = dx
+        velocityHistoryY[velocityIndex % VELOCITY_HISTORY_SIZE] = dy
+        velocityIndex++
+        velocitySamples = minOf(velocitySamples + 1, VELOCITY_HISTORY_SIZE)
+
+        // Velocidad suavizada = promedio del historial reciente.
+        velocityX = velocityHistoryX.take(velocitySamples).average().toFloat()
+        velocityY = velocityHistoryY.take(velocitySamples).average().toFloat()
 
         lastCenterX = centerX
         lastCenterY = centerY

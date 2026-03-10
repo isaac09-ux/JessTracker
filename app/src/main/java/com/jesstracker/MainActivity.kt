@@ -5,11 +5,15 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
+import android.os.Build
 import android.os.Bundle
 import android.content.res.Configuration
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -48,9 +52,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraManager: CameraManager
 
     // --- Estado compartido para touch (ultimo frame analizado) ---
+    // Accedidos desde analysis thread (escritura) y UI thread (lectura en tap).
+    // Usamos lock para evitar race conditions y reciclar bitmaps correctamente.
 
-    @Volatile private var latestDetections: List<RectF> = emptyList()
-    @Volatile private var latestFrame: Bitmap? = null
+    private val frameLock = Object()
+    private var latestDetections: List<RectF> = emptyList()
+    private var latestFrame: Bitmap? = null
 
     // --- Double-tap para deseleccionar ---
     private var lastTapTimeMs: Long = 0L
@@ -79,6 +86,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        enterImmersiveMode()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         previewView = findViewById(R.id.previewView)
         touchOverlay = findViewById(R.id.touchOverlay)
         trackingOverlay = findViewById(R.id.trackingOverlay)
@@ -87,6 +97,11 @@ class MainActivity : AppCompatActivity() {
         setupTouchListener()
         setupRecordButton()
         checkPermissions()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterImmersiveMode()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -101,6 +116,32 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         if (::cameraManager.isInitialized) {
             cameraManager.shutdown()
+        }
+        synchronized(frameLock) {
+            latestFrame?.recycle()
+            latestFrame = null
+        }
+    }
+
+    // --- Immersive fullscreen ---
+
+    private fun enterImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
         }
     }
 
@@ -126,8 +167,14 @@ class MainActivity : AppCompatActivity() {
         cameraManager.setup(
             previewView = previewView,
             onDetections = { detections, frame ->
-                latestDetections = detections
-                latestFrame = frame
+                synchronized(frameLock) {
+                    val oldFrame = latestFrame
+                    latestDetections = detections
+                    latestFrame = frame
+                    if (oldFrame != null && oldFrame !== frame && !oldFrame.isRecycled) {
+                        oldFrame.recycle()
+                    }
+                }
 
                 val cropBox = tracker.update(detections, frame)
 
@@ -176,9 +223,12 @@ class MainActivity : AppCompatActivity() {
             val normalizedX = screenX / v.width.toFloat()
             val normalizedY = screenY / v.height.toFloat()
 
-            val frame = latestFrame
-            val detections = latestDetections
-            if (frame != null && detections.isNotEmpty()) {
+            // Snapshot del frame y detecciones bajo lock para evitar race con analysis thread.
+            val (frame, detections) = synchronized(frameLock) {
+                Pair(latestFrame, latestDetections)
+            }
+
+            if (frame != null && !frame.isRecycled && detections.isNotEmpty()) {
                 tracker.onTap(PointF(normalizedX, normalizedY), detections, frame)
                 val cropBox = tracker.cropBox
                 trackingOverlay.update(tracker.state, cropBox)
