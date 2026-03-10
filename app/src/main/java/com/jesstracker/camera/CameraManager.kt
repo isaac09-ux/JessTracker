@@ -8,11 +8,13 @@ import android.graphics.RectF
 import android.hardware.camera2.CaptureRequest
 import android.provider.MediaStore
 import android.util.Size
+import android.view.Surface
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -34,6 +36,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * CameraManager — conecta CameraX con el SubjectTracker.
@@ -54,20 +57,27 @@ class CameraManager(
         // Umbrales para adaptar framing segun movimiento real del dispositivo.
         private const val LOW_HAND_MOTION = 0.18f
         private const val HIGH_HAND_MOTION = 0.9f
+
+        // Seguimiento de enfoque / metering para acercarnos al "auto framing" tipo Samsung.
+        private const val METERING_UPDATE_INTERVAL_MS = 350L
+        private const val MAX_CENTER_BIAS = 0.10f
     }
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var activeCamera: Camera? = null
     private var videoCapture: VideoCapture<Recorder>? = null
+    private var previewUseCase: Preview? = null
+    private var imageAnalysisUseCase: ImageAnalysis? = null
     private var activeRecording: Recording? = null
+    private var previewViewRef: PreviewView? = null
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val personDetector = PersonDetector(context)
     private val deviceMotionEstimator = DeviceMotionEstimator(context)
 
     private var currentZoomRatio: Float = MIN_ZOOM
-
-    private var currentZoomRatio: Float = MIN_ZOOM
+    private var targetRotation: Int = Surface.ROTATION_0
+    private var lastMeteringUpdateAtMs: Long = 0L
 
     var isRecording: Boolean = false
         private set
@@ -76,6 +86,7 @@ class CameraManager(
         previewView: PreviewView,
         onDetections: (detections: List<RectF>, frame: Bitmap) -> Unit
     ) {
+        previewViewRef = previewView
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         analysisExecutor.execute { personDetector.initialize() }
@@ -94,6 +105,7 @@ class CameraManager(
         val provider = cameraProvider ?: return
 
         val previewBuilder = Preview.Builder()
+            .setTargetRotation(targetRotation)
         val previewInterop = Camera2Interop.Extender(previewBuilder)
         previewInterop.setCaptureRequestOption(
             CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
@@ -107,9 +119,11 @@ class CameraManager(
         val preview = previewBuilder
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        previewUseCase = preview
 
         val analysisBuilder = ImageAnalysis.Builder()
             .setTargetResolution(Size(960, 540))
+            .setTargetRotation(targetRotation)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
 
@@ -126,6 +140,7 @@ class CameraManager(
                     processFrame(imageProxy, onDetections)
                 }
             }
+        imageAnalysisUseCase = imageAnalysis
 
         val recorder = Recorder.Builder()
             .setQualitySelector(
@@ -136,7 +151,9 @@ class CameraManager(
             )
             .build()
 
-        videoCapture = VideoCapture.withOutput(recorder)
+        videoCapture = VideoCapture.withOutput(recorder).also {
+            it.targetRotation = targetRotation
+        }
 
         try {
             provider.unbindAll()
@@ -175,6 +192,13 @@ class CameraManager(
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
+    fun setTargetRotation(rotation: Int) {
+        targetRotation = rotation
+        previewUseCase?.targetRotation = rotation
+        imageAnalysisUseCase?.targetRotation = rotation
+        videoCapture?.targetRotation = rotation
+    }
+
     fun updateAutoFraming(
         state: TrackerState,
         trackedBox: RectF?,
@@ -194,6 +218,7 @@ class CameraManager(
             val centerX = (trackedBox.left + trackedBox.right) * 0.5f
             val centerY = (trackedBox.top + trackedBox.bottom) * 0.5f
             val distanceToNearestEdge = minOf(centerX, 1f - centerX, centerY, 1f - centerY)
+            val contextSpread = estimateContextSpread(detections)
 
             val edgeCompensation = if (distanceToNearestEdge < 0.16f) 0.88f else 1f
             val crowdCompensation = when {
@@ -201,9 +226,11 @@ class CameraManager(
                 detections.size >= 5 -> 1.06f
                 else -> 1f
             }
+            val contextCompensation = 1f + (contextSpread * 0.06f)
 
-            val adaptiveTargetSubjectSize = (baseTargetSubjectSize * crowdCompensation * edgeCompensation)
-                .coerceIn(0.44f, 0.74f)
+            val adaptiveTargetSubjectSize = (
+                baseTargetSubjectSize * crowdCompensation * edgeCompensation * contextCompensation
+            ).coerceIn(0.44f, 0.76f)
 
             val targetZoom = (adaptiveTargetSubjectSize / subjectHeight).coerceIn(MIN_ZOOM, MAX_ZOOM)
 
@@ -217,11 +244,40 @@ class CameraManager(
             val adaptiveSmoothing = (BASE_ZOOM_SMOOTHING * motionFactor).coerceIn(0.18f, 0.42f)
             val smoothedZoom = currentZoomRatio + (targetZoom - currentZoomRatio) * adaptiveSmoothing
             applyZoom(smoothedZoom)
+            updateMeteringPoint(centerX, centerY, handMotion)
             return
         }
 
         val relaxedZoom = currentZoomRatio + (MIN_ZOOM - currentZoomRatio) * ZOOM_RESET_SMOOTHING
         applyZoom(relaxedZoom)
+    }
+
+    private fun estimateContextSpread(detections: List<RectF>): Float {
+        if (detections.size <= 1) return 0f
+        val minLeft = detections.minOf { it.left }
+        val maxRight = detections.maxOf { it.right }
+        return (maxRight - minLeft).coerceIn(0f, 1f)
+    }
+
+    private fun updateMeteringPoint(centerX: Float, centerY: Float, handMotion: Float) {
+        val previewView = previewViewRef ?: return
+        val camera = activeCamera ?: return
+
+        val now = System.currentTimeMillis()
+        if (now - lastMeteringUpdateAtMs < METERING_UPDATE_INTERVAL_MS) return
+
+        // Si la mano se mueve mucho, evitamos micro-ajustes agresivos para que no oscile.
+        val damping = if (handMotion > HIGH_HAND_MOTION) 0.5f else 1f
+        val compensatedX = (centerX + (0.5f - centerX) * MAX_CENTER_BIAS * damping).coerceIn(0.05f, 0.95f)
+        val compensatedY = (centerY + (0.5f - centerY) * MAX_CENTER_BIAS * damping).coerceIn(0.05f, 0.95f)
+
+        val point = previewView.meteringPointFactory.createPoint(compensatedX, compensatedY)
+        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+            .setAutoCancelDuration(2, TimeUnit.SECONDS)
+            .build()
+
+        camera.cameraControl.startFocusAndMetering(action)
+        lastMeteringUpdateAtMs = now
     }
 
     private fun applyZoom(zoomRatio: Float) {
