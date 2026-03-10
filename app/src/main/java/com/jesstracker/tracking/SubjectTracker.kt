@@ -3,6 +3,7 @@ package com.jesstracker.tracking
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
+import kotlin.math.abs
 
 /**
  * SubjectTracker — el cerebro del tracker.
@@ -14,6 +15,10 @@ import android.graphics.RectF
  *     +-----------------(expiro / reset)-------------+
  */
 class SubjectTracker {
+
+    companion object {
+        private const val MAX_CENTER_DISTANCE_FOR_TAP = 0.18f
+    }
 
     // --- Estado publico ---
 
@@ -32,7 +37,12 @@ class SubjectTracker {
     private val smoothingFilter = SmoothingFilter()
 
     private val embeddingBuffer = mutableListOf<FloatArray>()
-    private val EMBEDDING_BUFFER_SIZE = 5
+    private val EMBEDDING_BUFFER_SIZE = 4
+
+    private var lastCenterX: Float? = null
+    private var lastCenterY: Float? = null
+    private var velocityX: Float = 0f
+    private var velocityY: Float = 0f
 
     // --- API publica ---
 
@@ -43,7 +53,8 @@ class SubjectTracker {
         val embedding = embeddingExtractor.extractFromPatch(patch)
 
         embeddingBuffer.clear()
-        embeddingBuffer.add(embedding)
+        // Sembramos el buffer para que la identidad quede estable desde el primer frame.
+        repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(embedding.copyOf()) }
 
         identity = SubjectIdentity(
             embedding = embedding,
@@ -54,6 +65,7 @@ class SubjectTracker {
         )
 
         smoothingFilter.reset(tappedBox)
+        seedMotion(tappedBox)
         cropBox = tappedBox
         state = TrackerState.TRACKING
     }
@@ -75,6 +87,10 @@ class SubjectTracker {
         identity = null
         embeddingBuffer.clear()
         smoothingFilter.reset(null)
+        lastCenterX = null
+        lastCenterY = null
+        velocityX = 0f
+        velocityY = 0f
     }
 
     // --- Logica por estado ---
@@ -84,7 +100,7 @@ class SubjectTracker {
         detections: List<RectF>,
         frame: Bitmap
     ): RectF? {
-        val bestMatch = findBestIoUMatch(currentIdentity.lastKnownBox, detections)
+        val bestMatch = findBestTrackingMatch(currentIdentity, detections, frame)
 
         if (bestMatch == null) {
             state = TrackerState.LOST
@@ -92,6 +108,7 @@ class SubjectTracker {
             return cropBox
         }
 
+        updateMotion(bestMatch)
         updateEmbeddingBuffer(bestMatch, frame)
 
         val patch = embeddingExtractor.cropPatch(frame, bestMatch)
@@ -157,7 +174,7 @@ class SubjectTracker {
         val newEmbedding = embeddingExtractor.extractFromPatch(patch)
 
         embeddingBuffer.clear()
-        embeddingBuffer.add(newEmbedding)
+        repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(newEmbedding.copyOf()) }
 
         identity = currentIdentity.copy(
             embedding = newEmbedding,
@@ -168,6 +185,7 @@ class SubjectTracker {
         )
 
         smoothingFilter.reset(foundBox)
+        seedMotion(foundBox)
         cropBox = foundBox
         state = TrackerState.TRACKING
 
@@ -177,21 +195,91 @@ class SubjectTracker {
     // --- Helpers ---
 
     private fun findTappedDetection(tapPoint: PointF, detections: List<RectF>): RectF? {
-        return detections.firstOrNull { box -> box.contains(tapPoint.x, tapPoint.y) }
-    }
+        if (detections.isEmpty()) return null
 
-    private fun findBestIoUMatch(reference: RectF, candidates: List<RectF>): RectF? {
-        return candidates
-            .map { box -> Pair(box, calculateIoU(reference, box)) }
-            .filter { (_, iou) -> iou >= 0.3f }
-            .maxByOrNull { (_, iou) -> iou }
+        return detections
+            .map { box -> Pair(box, normalizedCenterDistance(tapPoint, box)) }
+            .filter { (_, distance) -> distance <= MAX_CENTER_DISTANCE_FOR_TAP }
+            .minByOrNull { (_, distance) -> distance }
             ?.first
     }
 
+    private fun findBestTrackingMatch(
+        currentIdentity: SubjectIdentity,
+        candidates: List<RectF>,
+        frame: Bitmap
+    ): RectF? {
+        if (candidates.isEmpty()) return null
+
+        val predictedBox = predictNextBox(currentIdentity.lastKnownBox)
+
+        return candidates
+            .map { box ->
+                val iou = calculateIoU(predictedBox, box)
+                val centerDistance = normalizedCenterDistance(predictedBox, box)
+
+                val score = if (iou >= 0.10f) {
+                    iou * 0.9f + (1f - centerDistance) * 0.1f
+                } else {
+                    val embedding = embeddingExtractor.extract(frame, box)
+                    val similarity = currentIdentity.cosineSimilarity(embedding)
+                    similarity * 0.75f + (1f - centerDistance) * 0.25f
+                }
+
+                Pair(box, score)
+            }
+            .filter { (_, score) -> score >= 0.42f }
+            .maxByOrNull { (_, score) -> score }
+            ?.first
+    }
+
+    private fun normalizedCenterDistance(reference: RectF, box: RectF): Float {
+        val refCenter = PointF((reference.left + reference.right) / 2f, (reference.top + reference.bottom) / 2f)
+        return normalizedCenterDistance(refCenter, box)
+    }
+
+    private fun normalizedCenterDistance(point: PointF, box: RectF): Float {
+        val centerX = (box.left + box.right) / 2f
+        val centerY = (box.top + box.bottom) / 2f
+        val dx = abs(point.x - centerX)
+        val dy = abs(point.y - centerY)
+        return (dx + dy) / 2f
+    }
+
+    private fun seedMotion(box: RectF) {
+        lastCenterX = (box.left + box.right) / 2f
+        lastCenterY = (box.top + box.bottom) / 2f
+        velocityX = 0f
+        velocityY = 0f
+    }
+
+    private fun updateMotion(box: RectF) {
+        val centerX = (box.left + box.right) / 2f
+        val centerY = (box.top + box.bottom) / 2f
+
+        val previousX = lastCenterX ?: centerX
+        val previousY = lastCenterY ?: centerY
+
+        velocityX = centerX - previousX
+        velocityY = centerY - previousY
+
+        lastCenterX = centerX
+        lastCenterY = centerY
+    }
+
+    private fun predictNextBox(reference: RectF): RectF {
+        val predictedLeft = (reference.left + velocityX).coerceIn(0f, 1f)
+        val predictedTop = (reference.top + velocityY).coerceIn(0f, 1f)
+        val predictedRight = (reference.right + velocityX).coerceIn(0f, 1f)
+        val predictedBottom = (reference.bottom + velocityY).coerceIn(0f, 1f)
+
+        return RectF(predictedLeft, predictedTop, predictedRight, predictedBottom)
+    }
+
     private fun calculateIoU(a: RectF, b: RectF): Float {
-        val intersectLeft   = maxOf(a.left, b.left)
-        val intersectTop    = maxOf(a.top, b.top)
-        val intersectRight  = minOf(a.right, b.right)
+        val intersectLeft = maxOf(a.left, b.left)
+        val intersectTop = maxOf(a.top, b.top)
+        val intersectRight = minOf(a.right, b.right)
         val intersectBottom = minOf(a.bottom, b.bottom)
 
         if (intersectRight <= intersectLeft || intersectBottom <= intersectTop) return 0f
