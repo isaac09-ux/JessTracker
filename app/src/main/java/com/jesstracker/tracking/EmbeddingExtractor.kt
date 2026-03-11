@@ -144,12 +144,13 @@ class EmbeddingExtractor {
     private fun computeBrightnessStats(patch: Bitmap, foregroundMask: BooleanArray): BrightnessStats {
         var sum = 0f
         var count = 0
+        val hsv = FloatArray(3)
 
         for (y in 0 until patch.height) {
             for (x in 0 until patch.width) {
                 if (!foregroundMask[y * patch.width + x]) continue
-                val value = Color.value(patch.getPixel(x, y))
-                sum += value
+                Color.colorToHSV(patch.getPixel(x, y), hsv)
+                sum += hsv[2]
                 count++
             }
         }
