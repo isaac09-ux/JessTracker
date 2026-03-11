@@ -75,6 +75,8 @@ class CameraManager(
         private const val BATTERY_CHECK_INTERVAL_MS = 30_000L
         private const val LOW_BATTERY_THRESHOLD = 20
         private const val MEDIUM_BATTERY_THRESHOLD = 40
+
+        private const val LIGHT_ADJUST_INTERVAL_MS = 900L
     }
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -84,11 +86,16 @@ class CameraManager(
     private var imageAnalysisUseCase: ImageAnalysis? = null
     private var activeRecording: Recording? = null
     private var previewViewRef: PreviewView? = null
-    private var detectionsCallbackRef: ((List<RectF>, Bitmap) -> Unit)? = null
+    private var detectionsCallbackRef: ((List<RectF>, Bitmap, LightInfo) -> Unit)? = null
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val personDetector = PersonDetector(context)
     private val deviceMotionEstimator = DeviceMotionEstimator(context)
+    private val lightAnalyzer = LightAnalyzer()
+
+    private var lastLightAdjustmentAtMs: Long = 0L
+    private var torchEnabled: Boolean = false
+    private var lastExposureIndex: Int = 0
 
     private var currentZoomRatio: Float = MIN_ZOOM
     private var targetRotation: Int = Surface.ROTATION_0
@@ -104,7 +111,7 @@ class CameraManager(
 
     fun setup(
         previewView: PreviewView,
-        onDetections: (detections: List<RectF>, frame: Bitmap) -> Unit
+        onDetections: (detections: List<RectF>, frame: Bitmap, lightInfo: LightInfo) -> Unit
     ) {
         previewViewRef = previewView
         detectionsCallbackRef = onDetections
@@ -121,7 +128,7 @@ class CameraManager(
 
     private fun bindUseCases(
         previewView: PreviewView,
-        onDetections: (List<RectF>, Bitmap) -> Unit
+        onDetections: (List<RectF>, Bitmap, LightInfo) -> Unit
     ) {
         val provider = cameraProvider ?: return
 
@@ -187,6 +194,8 @@ class CameraManager(
             )
             applyZoom(currentZoomRatio)
             enableDeviceStabilization()
+            lastExposureIndex = 0
+            torchEnabled = false
         } catch (e: Exception) {
             Log.e(TAG, "Error binding use cases", e)
         }
@@ -194,7 +203,7 @@ class CameraManager(
 
     private fun processFrame(
         imageProxy: ImageProxy,
-        onDetections: (List<RectF>, Bitmap) -> Unit
+        onDetections: (List<RectF>, Bitmap, LightInfo) -> Unit
     ) {
         try {
             // Throttling adaptativo: saltar frames cuando bateria baja.
@@ -213,10 +222,40 @@ class CameraManager(
                 bitmap.recycle()
             }
 
-            val detections = personDetector.detect(rotatedBitmap)
-            onDetections(detections, rotatedBitmap)
+            val lightInfo = lightAnalyzer.analyze(rotatedBitmap)
+            applyLowLightAdjustments(lightInfo)
+
+            val detections = personDetector.detect(rotatedBitmap, lightInfo)
+            onDetections(detections, rotatedBitmap, lightInfo)
         } finally {
             imageProxy.close()
+        }
+    }
+
+    private fun applyLowLightAdjustments(lightInfo: LightInfo) {
+        val camera = activeCamera ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastLightAdjustmentAtMs < LIGHT_ADJUST_INTERVAL_MS) return
+        lastLightAdjustmentAtMs = now
+
+        val targetTorch = lightInfo.level == LightLevel.ULTRA_LOW
+        if (camera.cameraInfo.hasFlashUnit() && targetTorch != torchEnabled) {
+            camera.cameraControl.enableTorch(targetTorch)
+            torchEnabled = targetTorch
+        }
+
+        val exposureState = camera.cameraInfo.exposureState
+        val range = exposureState.exposureCompensationRange
+        val targetIndex = when (lightInfo.level) {
+            LightLevel.BRIGHT -> 0
+            LightLevel.NORMAL -> (range.upper / 4).coerceAtLeast(0)
+            LightLevel.LOW -> (range.upper * 2 / 3).coerceAtLeast(0)
+            LightLevel.ULTRA_LOW -> range.upper
+        }.coerceIn(range.lower, range.upper)
+
+        if (targetIndex != lastExposureIndex) {
+            camera.cameraControl.setExposureCompensationIndex(targetIndex)
+            lastExposureIndex = targetIndex
         }
     }
 
@@ -451,6 +490,7 @@ class CameraManager(
     }
 
     fun shutdown() {
+        activeCamera?.cameraControl?.enableTorch(false)
         personDetector.close()
         deviceMotionEstimator.stop()
         analysisExecutor.shutdown()

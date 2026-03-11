@@ -173,7 +173,7 @@ class MainActivity : AppCompatActivity() {
 
         cameraManager.setup(
             previewView = previewView,
-            onDetections = { detections, frame ->
+            onDetections = { detections, frame, lightInfo ->
                 synchronized(frameLock) {
                     val oldFrame = latestFrame
                     latestDetections = detections
@@ -188,6 +188,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     val conf = tracker.identity?.confidence ?: 0f
                     trackingOverlay.updateStatusInfo(conf, detections.size)
+                    trackingOverlay.updateLightInfo(lightInfo.level, lightInfo.brightness)
                     trackingOverlay.updateDetections(detections)
                     trackingOverlay.updateJerseyNumber(tracker.jerseyNumber)
                     trackingOverlay.update(tracker.state, cropBox)

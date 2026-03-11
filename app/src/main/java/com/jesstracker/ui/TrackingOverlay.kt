@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
+import com.jesstracker.camera.LightLevel
 import com.jesstracker.tracking.TrackerState
 
 /**
@@ -34,6 +35,9 @@ class TrackingOverlay @JvmOverloads constructor(
         private const val STATUS_DOT_RADIUS = 6f
         private const val STATUS_TEXT_SIZE = 28f
         private const val STATUS_MARGIN_TOP = 80f
+
+        private const val LIGHT_PILL_WIDTH = 260f
+        private const val LIGHT_BAR_HEIGHT = 14f
     }
 
     // --- Estado ---
@@ -47,6 +51,8 @@ class TrackingOverlay @JvmOverloads constructor(
     private var lastViewHeight: Int = 0
     private var confidence: Float = 0f
     private var detectionCount: Int = 0
+    private var lightLevel: LightLevel = LightLevel.NORMAL
+    private var lightBrightness: Float = 0.5f
 
     // Detecciones crudas para mostrar en IDLE (el usuario ve a quien puede tocar).
     private var idleDetections: List<RectF> = emptyList()
@@ -154,6 +160,11 @@ class TrackingOverlay @JvmOverloads constructor(
         this.detectionCount = detectionCount
     }
 
+    fun updateLightInfo(level: LightLevel, brightness: Float) {
+        lightLevel = level
+        lightBrightness = brightness.coerceIn(0f, 1f)
+    }
+
     /** Pasar las detecciones crudas para que se dibujen como marcadores en IDLE. */
     fun updateDetections(detections: List<RectF>) {
         idleDetections = detections
@@ -190,6 +201,7 @@ class TrackingOverlay @JvmOverloads constructor(
 
         drawTapFeedback(canvas)
         drawStatusIndicator(canvas)
+        drawLightIndicator(canvas)
 
         // En IDLE, mostrar todas las personas detectadas como marcadores sutiles.
         if (trackerState == TrackerState.IDLE) {
@@ -284,6 +296,56 @@ class TrackingOverlay @JvmOverloads constructor(
         val textX = dotCx + STATUS_DOT_RADIUS + STATUS_PADDING
         val textY = top + pillHeight / 2f + STATUS_TEXT_SIZE / 3f
         canvas.drawText(statusText, textX, textY, statusTextPaint)
+    }
+
+    private fun drawLightIndicator(canvas: Canvas) {
+        val label = when (lightLevel) {
+            LightLevel.BRIGHT -> "LUZ ALTA"
+            LightLevel.NORMAL -> "LUZ NORMAL"
+            LightLevel.LOW -> "POCA LUZ"
+            LightLevel.ULTRA_LOW -> "ULTRA BAJA"
+        }
+
+        val right = width - STATUS_PADDING
+        val left = right - LIGHT_PILL_WIDTH
+        val top = STATUS_MARGIN_TOP
+        val bottom = top + STATUS_TEXT_SIZE + STATUS_PADDING * 2.0f
+
+        val rect = RectF(left, top, right, bottom)
+        canvas.drawRoundRect(rect, STATUS_PILL_RADIUS, STATUS_PILL_RADIUS, statusBgPaint)
+
+        val dotColor = when (lightLevel) {
+            LightLevel.BRIGHT -> Color.parseColor("#00E676")
+            LightLevel.NORMAL -> Color.parseColor("#8BC34A")
+            LightLevel.LOW -> Color.parseColor("#FFC107")
+            LightLevel.ULTRA_LOW -> Color.parseColor("#FF5252")
+        }
+
+        statusDotPaint.color = dotColor
+        canvas.drawCircle(left + STATUS_PADDING + STATUS_DOT_RADIUS, top + STATUS_PADDING + STATUS_DOT_RADIUS, STATUS_DOT_RADIUS, statusDotPaint)
+
+        statusTextPaint.textSize = 24f
+        val textX = left + STATUS_PADDING * 2 + STATUS_DOT_RADIUS * 2
+        val textY = top + STATUS_PADDING + STATUS_TEXT_SIZE * 0.65f
+        canvas.drawText(label, textX, textY, statusTextPaint)
+
+        val barLeft = left + STATUS_PADDING
+        val barRight = right - STATUS_PADDING
+        val barTop = bottom - STATUS_PADDING - LIGHT_BAR_HEIGHT
+        val barBottom = barTop + LIGHT_BAR_HEIGHT
+
+        val barBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#44FFFFFF")
+            style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(RectF(barLeft, barTop, barRight, barBottom), 10f, 10f, barBg)
+
+        val fillRight = barLeft + (barRight - barLeft) * lightBrightness
+        val barFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = dotColor
+            style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(RectF(barLeft, barTop, fillRight, barBottom), 10f, 10f, barFill)
     }
 
     private fun updateAutoFrameGuide(box: RectF?) {

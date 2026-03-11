@@ -45,8 +45,8 @@ dependencies {
     // MediaPipe — deteccion de personas
     implementation 'com.google.mediapipe:tasks-vision:0.10.10'
 
-    // ML Kit — OCR on-device para numeros de camiseta
-    implementation 'com.google.mlkit:text-recognition:16.0.0'
+    // ML Kit OCR via Google Play Services (evita empaquetar libmlkit_google_ocr.so en el APK)
+    implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
 
     // Core Android
     implementation 'androidx.core:core-ktx:1.12.0'
