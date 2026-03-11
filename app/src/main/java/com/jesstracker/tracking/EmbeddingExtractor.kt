@@ -31,6 +31,9 @@ class EmbeddingExtractor {
         private const val SATURATION_THRESHOLD = 0.12f
         private const val VALUE_THRESHOLD = 0.12f
         private const val EDGE_SUPPRESSION = 0.18f
+        private const val TARGET_MEAN_BRIGHTNESS = 0.52f
+        private const val MIN_BRIGHTNESS_GAIN = 0.85f
+        private const val MAX_BRIGHTNESS_GAIN = 1.85f
     }
 
     fun extract(frame: Bitmap, box: RectF): FloatArray {
@@ -48,6 +51,10 @@ class EmbeddingExtractor {
 
         try {
             val foregroundMask = buildForegroundMask(resized)
+            val brightnessStats = computeBrightnessStats(resized, foregroundMask)
+            val normalizedGain = (TARGET_MEAN_BRIGHTNESS / brightnessStats.mean.coerceAtLeast(0.08f))
+                .coerceIn(MIN_BRIGHTNESS_GAIN, MAX_BRIGHTNESS_GAIN)
+
             val embedding = FloatArray(TOTAL_BINS)
             val zoneHeight = resized.height / NUM_ZONES
             val hsv = FloatArray(3)
@@ -64,7 +71,7 @@ class EmbeddingExtractor {
 
                     val hue = hsv[0]
                     val saturation = hsv[1]
-                    val value = hsv[2]
+                    val value = normalizeValue(hsv[2], brightnessStats.mean, normalizedGain)
 
                     // Canal Hue: solo si hay suficiente saturacion (evita grises/blancos).
                     if (saturation > SATURATION_THRESHOLD) {
@@ -134,9 +141,35 @@ class EmbeddingExtractor {
         return mask
     }
 
+    private fun computeBrightnessStats(patch: Bitmap, foregroundMask: BooleanArray): BrightnessStats {
+        var sum = 0f
+        var count = 0
+
+        for (y in 0 until patch.height) {
+            for (x in 0 until patch.width) {
+                if (!foregroundMask[y * patch.width + x]) continue
+                val value = Color.value(patch.getPixel(x, y))
+                sum += value
+                count++
+            }
+        }
+
+        return if (count == 0) BrightnessStats(0.5f) else BrightnessStats((sum / count).coerceIn(0f, 1f))
+    }
+
+    private fun normalizeValue(rawValue: Float, meanBrightness: Float, gain: Float): Float {
+        val centered = rawValue - meanBrightness
+        val normalized = TARGET_MEAN_BRIGHTNESS + centered * gain
+        return normalized.coerceIn(0f, 1f)
+    }
+
     private fun normalizeL1(array: FloatArray): FloatArray {
         val sum = array.sum()
         if (sum == 0f) return array
         return FloatArray(array.size) { array[it] / sum }
     }
+
+    private data class BrightnessStats(
+        val mean: Float
+    )
 }

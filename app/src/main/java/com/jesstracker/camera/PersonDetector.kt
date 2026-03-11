@@ -26,7 +26,9 @@ class PersonDetector(private val context: Context) {
     companion object {
         private const val TAG = "PersonDetector"
         private const val MODEL_NAME = "efficientdet_lite0.tflite"
-        private const val MIN_CONFIDENCE = 0.40f
+        private const val BASE_CONFIDENCE = 0.45f
+        private const val LOW_LIGHT_CONFIDENCE = 0.30f
+        private const val ULTRA_LOW_LIGHT_CONFIDENCE = 0.18f
         private const val MAX_RESULTS = 12
 
         // Permite detectar jugadores lejanos (fondo de cancha).
@@ -81,7 +83,7 @@ class PersonDetector(private val context: Context) {
         val options = ObjectDetector.ObjectDetectorOptions.builder()
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.IMAGE)
-            .setScoreThreshold(MIN_CONFIDENCE)
+            .setScoreThreshold(ULTRA_LOW_LIGHT_CONFIDENCE)
             .setMaxResults(MAX_RESULTS)
             .build()
 
@@ -90,22 +92,28 @@ class PersonDetector(private val context: Context) {
 
     // --- Deteccion ---
 
-    fun detect(frame: Bitmap): List<RectF> {
+    fun detect(frame: Bitmap, lightInfo: LightInfo): List<RectF> {
         val det = detector ?: return emptyList()
 
         return try {
             val mpImage = BitmapImageBuilder(frame).build()
             val result: ObjectDetectorResult = det.detect(mpImage)
 
+            val adaptiveConfidence = when (lightInfo.level) {
+                LightLevel.BRIGHT, LightLevel.NORMAL -> BASE_CONFIDENCE
+                LightLevel.LOW -> LOW_LIGHT_CONFIDENCE
+                LightLevel.ULTRA_LOW -> ULTRA_LOW_LIGHT_CONFIDENCE
+            }
+
             result.detections()
                 .filter { detection ->
                     detection.categories().any { category ->
                         val label = category.categoryName().orEmpty().lowercase(Locale.US)
-                        label in TRACKABLE_LABELS && category.score() >= MIN_CONFIDENCE
+                        label in TRACKABLE_LABELS && category.score() >= adaptiveConfidence
                     }
                 }
                 .mapNotNull { detection ->
-                    normalizeBox(detection.boundingBox(), frame.width, frame.height)
+                    normalizeBox(detection.boundingBox(), frame.width, frame.height, lightInfo.level)
                 }
         } catch (e: Exception) {
             Log.e(TAG, "Error en deteccion: ${e.message}")
@@ -115,7 +123,7 @@ class PersonDetector(private val context: Context) {
 
     // --- Helpers ---
 
-    private fun normalizeBox(box: RectF, frameW: Int, frameH: Int): RectF? {
+    private fun normalizeBox(box: RectF, frameW: Int, frameH: Int, lightLevel: LightLevel): RectF? {
         val left = box.left / frameW
         val top = box.top / frameH
         val right = box.right / frameW
@@ -123,9 +131,20 @@ class PersonDetector(private val context: Context) {
 
         if (left >= 1f || top >= 1f || right <= 0f || bottom <= 0f) return null
 
+        val minHeight = when (lightLevel) {
+            LightLevel.BRIGHT, LightLevel.NORMAL -> MIN_NORMALIZED_HEIGHT
+            LightLevel.LOW -> MIN_NORMALIZED_HEIGHT * 0.85f
+            LightLevel.ULTRA_LOW -> MIN_NORMALIZED_HEIGHT * 0.65f
+        }
+        val minWidth = when (lightLevel) {
+            LightLevel.BRIGHT, LightLevel.NORMAL -> MIN_NORMALIZED_WIDTH
+            LightLevel.LOW -> MIN_NORMALIZED_WIDTH * 0.85f
+            LightLevel.ULTRA_LOW -> MIN_NORMALIZED_WIDTH * 0.65f
+        }
+
         val height = bottom - top
         val width = right - left
-        if (height < MIN_NORMALIZED_HEIGHT || width < MIN_NORMALIZED_WIDTH) return null
+        if (height < minHeight || width < minWidth) return null
 
         return RectF(
             left.coerceIn(0f, 1f),
