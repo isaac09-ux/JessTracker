@@ -94,7 +94,6 @@ class CameraManager(
     private val lightAnalyzer = LightAnalyzer()
 
     private var lastLightAdjustmentAtMs: Long = 0L
-    private var torchEnabled: Boolean = false
     private var lastExposureIndex: Int = 0
 
     private var currentZoomRatio: Float = MIN_ZOOM
@@ -195,7 +194,6 @@ class CameraManager(
             applyZoom(currentZoomRatio)
             enableDeviceStabilization()
             lastExposureIndex = 0
-            torchEnabled = false
         } catch (e: Exception) {
             Log.e(TAG, "Error binding use cases", e)
         }
@@ -237,12 +235,6 @@ class CameraManager(
         val now = System.currentTimeMillis()
         if (now - lastLightAdjustmentAtMs < LIGHT_ADJUST_INTERVAL_MS) return
         lastLightAdjustmentAtMs = now
-
-        val targetTorch = lightInfo.level == LightLevel.ULTRA_LOW
-        if (camera.cameraInfo.hasFlashUnit() && targetTorch != torchEnabled) {
-            camera.cameraControl.enableTorch(targetTorch)
-            torchEnabled = targetTorch
-        }
 
         val exposureState = camera.cameraInfo.exposureState
         val range = exposureState.exposureCompensationRange
@@ -434,7 +426,6 @@ class CameraManager(
 
         activeRecording = capture.output
             .prepareRecording(context, outputOptions)
-            .withAudioEnabled()
             .start(ContextCompat.getMainExecutor(context)) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> {
@@ -490,7 +481,6 @@ class CameraManager(
     }
 
     fun shutdown() {
-        activeCamera?.cameraControl?.enableTorch(false)
         personDetector.close()
         deviceMotionEstimator.stop()
         analysisExecutor.shutdown()
