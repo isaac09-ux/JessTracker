@@ -30,7 +30,7 @@ import com.jesstracker.ui.TrackingOverlay
  * MainActivity — conecta todos los modulos.
  *
  * Flujo:
- *   1. Solicitar permisos (camara + microfono)
+ *   1. Solicitar permisos de camara
  *   2. Inicializar CameraManager con CameraPreviewView
  *   3. CameraManager -> frame -> SubjectTracker.update()
  *   4. SubjectTracker -> cropBox -> TrackingOverlay.update()
@@ -76,8 +76,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val requiredPermissions = arrayOf(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO
+        Manifest.permission.CAMERA
     )
 
     // --- Lifecycle ---

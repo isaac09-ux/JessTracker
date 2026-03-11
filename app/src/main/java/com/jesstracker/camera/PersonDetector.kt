@@ -53,41 +53,28 @@ class PersonDetector(private val context: Context) {
     // --- Inicializacion ---
 
     fun initialize() {
-        // Intentar GPU primero; si falla, caer a CPU.
+        // Forzar GPU para mantener latencia minima en tracking en tiempo real.
         try {
-            detector = createDetector(Delegate.GPU)
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath(MODEL_NAME)
+                .setDelegate(Delegate.GPU)
+                .build()
+
+            val options = ObjectDetector.ObjectDetectorOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.IMAGE)
+                .setScoreThreshold(ULTRA_LOW_LIGHT_CONFIDENCE)
+                .setMaxResults(MAX_RESULTS)
+                .build()
+
+            detector = ObjectDetector.createFromOptions(context, options)
             isInitialized = true
             Log.i(TAG, "Inicializado con GPU")
-            return
         } catch (e: Exception) {
-            Log.w(TAG, "GPU no disponible, intentando CPU: ${e.message}")
-        }
-
-        try {
-            detector = createDetector(Delegate.CPU)
-            isInitialized = true
-            Log.i(TAG, "Inicializado con CPU")
-        } catch (e: Exception) {
-            Log.e(TAG, "No se pudo inicializar el detector: ${e.message}", e)
+            Log.e(TAG, "No se pudo inicializar el detector con GPU: ${e.message}", e)
             initializationError = e.message
             isInitialized = false
         }
-    }
-
-    private fun createDetector(delegate: Delegate): ObjectDetector {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(MODEL_NAME)
-            .setDelegate(delegate)
-            .build()
-
-        val options = ObjectDetector.ObjectDetectorOptions.builder()
-            .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.IMAGE)
-            .setScoreThreshold(ULTRA_LOW_LIGHT_CONFIDENCE)
-            .setMaxResults(MAX_RESULTS)
-            .build()
-
-        return ObjectDetector.createFromOptions(context, options)
     }
 
     // --- Deteccion ---
