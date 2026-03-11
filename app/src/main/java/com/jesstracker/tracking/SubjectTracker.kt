@@ -45,6 +45,11 @@ class SubjectTracker {
 
         // Cuantos frames de velocidad reciente guardar para prediccion suavizada.
         private const val VELOCITY_HISTORY_SIZE = 5
+
+        // Re-ID consecutivo: cuantos frames seguidos debe ganar el MISMO candidato
+        // antes de aceptarlo. Evita false re-locks de un solo frame.
+        private const val REID_CONSECUTIVE_REQUIRED = 3
+        private const val REID_SAME_CANDIDATE_IOU = 0.40f
     }
 
     // --- Estado publico ---
@@ -80,6 +85,14 @@ class SubjectTracker {
     // Aspect ratio del sujeto seleccionado, para filtrar candidatos de tamano muy diferente.
     private var referenceAspectRatio: Float = 1f
     private var referenceHeight: Float = 0f
+
+    // Re-ID consecutivo: guardar el candidato ganador y cuantos frames lleva ganando.
+    private var reIdCandidateBox: RectF? = null
+    private var reIdConsecutiveCount: Int = 0
+
+    // CropBox congelado: cuando se pierde el sujeto, congelar el crop en la ultima
+    // posicion conocida en vez de dejarlo derivar con la velocidad.
+    private var frozenCropBox: RectF? = null
 
     // --- API publica ---
 
@@ -137,6 +150,9 @@ class SubjectTracker {
         velocitySamples = 0
         referenceAspectRatio = 1f
         referenceHeight = 0f
+        reIdCandidateBox = null
+        reIdConsecutiveCount = 0
+        frozenCropBox = null
     }
 
     // --- Logica por estado ---
@@ -151,6 +167,10 @@ class SubjectTracker {
         if (bestMatch == null) {
             state = TrackerState.LOST
             identity = currentIdentity.incrementLost()
+            // Congelar el crop en la ultima posicion buena conocida.
+            frozenCropBox = cropBox?.let { RectF(it) }
+            reIdCandidateBox = null
+            reIdConsecutiveCount = 0
             return cropBox
         }
 
@@ -192,9 +212,10 @@ class SubjectTracker {
 
         identity = currentIdentity.incrementLost()
 
-        // Actualizar cropBox con prediccion de velocidad para que el overlay
-        // siga moviéndose hacia donde iba el sujeto (en vez de congelarse).
-        cropBox = predictNextBox(currentIdentity.lastKnownBox)
+        // Congelar el cropBox en la ultima posicion buena. Antes se usaba prediccion
+        // de velocidad, pero eso causa que el box derive hacia un lugar incorrecto
+        // y confunda al usuario (parece que esta trackeando a otro).
+        cropBox = frozenCropBox ?: cropBox
 
         if (detections.isEmpty()) return cropBox
 
@@ -255,13 +276,36 @@ class SubjectTracker {
 
         if (bestCandidate == null) {
             identity = currentIdentity.incrementLost()
+            // Candidato perdido → resetear contador consecutivo.
+            reIdConsecutiveCount = 0
+            reIdCandidateBox = null
             return cropBox
         }
 
         val (foundBox, combinedScore, foundEmbedding) = bestCandidate
 
-        // Reutilizamos el embedding ya calculado durante el scoring; solo re-cropeamos
-        // para obtener el Bitmap que guarda SubjectIdentity (es barato vs extractFromPatch).
+        // --- Consecutive-match: exigir que el MISMO candidato gane N frames seguidos ---
+        val prevCandidate = reIdCandidateBox
+        if (prevCandidate != null && calculateIoU(prevCandidate, foundBox) >= REID_SAME_CANDIDATE_IOU) {
+            // Mismo candidato que el frame anterior.
+            reIdConsecutiveCount++
+        } else {
+            // Candidato diferente → empezar de nuevo.
+            reIdConsecutiveCount = 1
+        }
+        reIdCandidateBox = RectF(foundBox)
+
+        if (reIdConsecutiveCount < REID_CONSECUTIVE_REQUIRED) {
+            // Todavia no tiene suficientes frames consecutivos. Seguir buscando.
+            identity = currentIdentity.incrementLost()
+            return cropBox
+        }
+
+        // Candidato confirmado — aceptar re-identificacion.
+        reIdConsecutiveCount = 0
+        reIdCandidateBox = null
+        frozenCropBox = null
+
         val patch = embeddingExtractor.cropPatch(frame, foundBox)
 
         embeddingBuffer.clear()
