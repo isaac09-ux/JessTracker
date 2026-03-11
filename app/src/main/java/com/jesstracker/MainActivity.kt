@@ -189,6 +189,7 @@ class MainActivity : AppCompatActivity() {
                     val conf = tracker.identity?.confidence ?: 0f
                     trackingOverlay.updateStatusInfo(conf, detections.size)
                     trackingOverlay.updateDetections(detections)
+                    trackingOverlay.updateJerseyNumber(tracker.jerseyNumber)
                     trackingOverlay.update(tracker.state, cropBox)
                     updateHintVisibility(tracker.state)
                     cameraManager.updateAutoFraming(

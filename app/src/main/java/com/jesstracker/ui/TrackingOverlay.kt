@@ -51,6 +51,9 @@ class TrackingOverlay @JvmOverloads constructor(
     // Detecciones crudas para mostrar en IDLE (el usuario ve a quien puede tocar).
     private var idleDetections: List<RectF> = emptyList()
 
+    // Numero de camiseta detectado por OCR.
+    private var jerseyNumber: Int? = null
+
     private var tapX: Float = 0f
     private var tapY: Float = 0f
     private var tapAlpha: Int = 0
@@ -156,6 +159,11 @@ class TrackingOverlay @JvmOverloads constructor(
         idleDetections = detections
     }
 
+    /** Actualizar el numero de camiseta leido por OCR. */
+    fun updateJerseyNumber(number: Int?) {
+        jerseyNumber = number
+    }
+
     fun showTapFeedback(x: Float, y: Float) {
         tapX = x
         tapY = y
@@ -210,7 +218,8 @@ class TrackingOverlay @JvmOverloads constructor(
                 drawCornerAccents(canvas, box, trackingPaint)
                 drawCropGuide(canvas)
                 val pct = (confidence * 100).toInt()
-                drawStateLabel(canvas, box, "LOCK $pct%", trackColor)
+                val numberTag = jerseyNumber?.let { " #$it" } ?: ""
+                drawStateLabel(canvas, box, "LOCK $pct%$numberTag", trackColor)
             }
 
             TrackerState.LOST -> {
@@ -243,7 +252,8 @@ class TrackingOverlay @JvmOverloads constructor(
             TrackerState.TRACKING -> {
                 dotColor = Color.parseColor("#00FF88")
                 val pct = (confidence * 100).toInt()
-                statusText = "LOCK $pct%"
+                val numberTag = jerseyNumber?.let { " #$it" } ?: ""
+                statusText = "LOCK $pct%$numberTag"
             }
             TrackerState.LOST -> {
                 dotColor = Color.parseColor("#FFD700")

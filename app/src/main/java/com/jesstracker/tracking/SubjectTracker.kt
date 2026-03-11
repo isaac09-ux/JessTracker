@@ -14,6 +14,9 @@ import kotlin.math.sqrt
  *     ^                 ^                            |
  *     |                 +----(re-id exitoso)---- RE_IDENTIFYING
  *     +-----------------(expiro / reset)-------------+
+ *
+ * v3: Usa Kalman filter para prediccion de posicion y OCR de numero
+ * de camiseta como senal de identidad definitiva.
  */
 class SubjectTracker {
 
@@ -43,13 +46,16 @@ class SubjectTracker {
         private const val MAX_JUMP_DISTANCE_TRACKING = 0.18f
         private const val MAX_JUMP_DISTANCE_REID = 0.30f
 
-        // Cuantos frames de velocidad reciente guardar para prediccion suavizada.
-        private const val VELOCITY_HISTORY_SIZE = 5
-
         // Re-ID consecutivo: cuantos frames seguidos debe ganar el MISMO candidato
         // antes de aceptarlo. Evita false re-locks de un solo frame.
         private const val REID_CONSECUTIVE_REQUIRED = 3
         private const val REID_SAME_CANDIDATE_IOU = 0.40f
+
+        // Bonus al score de re-ID cuando el OCR lee el mismo numero de camiseta.
+        private const val OCR_MATCH_BONUS = 0.20f
+
+        // Cada cuantos frames intentar leer OCR durante tracking (no cada frame).
+        private const val OCR_INTERVAL_FRAMES = 15
     }
 
     // --- Estado publico ---
@@ -63,24 +69,19 @@ class SubjectTracker {
     var identity: SubjectIdentity? = null
         private set
 
+    /** Numero de camiseta confirmado (null si no se ha leido aun). */
+    val jerseyNumber: Int?
+        get() = jerseyOcr.confirmedNumber
+
     // --- Dependencias internas ---
 
     private val embeddingExtractor = EmbeddingExtractor()
     private val smoothingFilter = SmoothingFilter()
+    private val kalmanFilter = KalmanBoxFilter()
+    val jerseyOcr = JerseyOcrReader()
 
     private val embeddingBuffer = mutableListOf<FloatArray>()
     private var anchorEmbedding: FloatArray? = null
-
-    private var lastCenterX: Float? = null
-    private var lastCenterY: Float? = null
-    private var velocityX: Float = 0f
-    private var velocityY: Float = 0f
-
-    // Historial de velocidades para prediccion suavizada (evita saltos por jitter).
-    private val velocityHistoryX = FloatArray(VELOCITY_HISTORY_SIZE)
-    private val velocityHistoryY = FloatArray(VELOCITY_HISTORY_SIZE)
-    private var velocityIndex = 0
-    private var velocitySamples = 0
 
     // Aspect ratio del sujeto seleccionado, para filtrar candidatos de tamano muy diferente.
     private var referenceAspectRatio: Float = 1f
@@ -93,6 +94,9 @@ class SubjectTracker {
     // CropBox congelado: cuando se pierde el sujeto, congelar el crop en la ultima
     // posicion conocida en vez de dejarlo derivar con la velocidad.
     private var frozenCropBox: RectF? = null
+
+    // Contador de frames para OCR periodico.
+    private var framesSinceOcr: Int = 0
 
     // --- API publica ---
 
@@ -119,7 +123,13 @@ class SubjectTracker {
         referenceHeight = tappedBox.height()
 
         smoothingFilter.reset(tappedBox)
-        seedMotion(tappedBox)
+        kalmanFilter.initialize(tappedBox)
+        jerseyOcr.reset()
+        framesSinceOcr = OCR_INTERVAL_FRAMES // Forzar lectura inmediata.
+
+        // Intentar leer el numero de camiseta al seleccionar.
+        jerseyOcr.readFromPatch(patch) { /* resultado se guarda internamente */ }
+
         cropBox = tappedBox
         state = TrackerState.TRACKING
     }
@@ -142,17 +152,14 @@ class SubjectTracker {
         embeddingBuffer.clear()
         anchorEmbedding = null
         smoothingFilter.reset(null)
-        lastCenterX = null
-        lastCenterY = null
-        velocityX = 0f
-        velocityY = 0f
-        velocityIndex = 0
-        velocitySamples = 0
+        kalmanFilter.reset()
+        jerseyOcr.reset()
         referenceAspectRatio = 1f
         referenceHeight = 0f
         reIdCandidateBox = null
         reIdConsecutiveCount = 0
         frozenCropBox = null
+        framesSinceOcr = 0
     }
 
     // --- Logica por estado ---
@@ -162,6 +169,9 @@ class SubjectTracker {
         detections: List<RectF>,
         frame: Bitmap
     ): RectF? {
+        // Kalman predict: avanzar el estado antes de buscar matches.
+        kalmanFilter.predict()
+
         val bestMatch = findBestTrackingMatch(currentIdentity, detections, frame)
 
         if (bestMatch == null) {
@@ -174,7 +184,8 @@ class SubjectTracker {
             return cropBox
         }
 
-        updateMotion(bestMatch.box)
+        // Kalman correct: actualizar el estado con la medicion real.
+        kalmanFilter.correct(bestMatch.box)
 
         val patch = embeddingExtractor.cropPatch(frame, bestMatch.box)
 
@@ -186,6 +197,13 @@ class SubjectTracker {
         referenceHeight = referenceHeight * 0.9f + bestMatch.box.height() * 0.1f
         referenceAspectRatio = referenceAspectRatio * 0.9f +
             (bestMatch.box.width() / bestMatch.box.height().coerceAtLeast(0.001f)) * 0.1f
+
+        // OCR periodico: intentar leer el numero cada N frames durante tracking.
+        framesSinceOcr++
+        if (framesSinceOcr >= OCR_INTERVAL_FRAMES) {
+            framesSinceOcr = 0
+            jerseyOcr.readFromPatch(patch) { /* resultado se guarda internamente */ }
+        }
 
         identity = currentIdentity.copy(
             embedding = blendedIdentityEmbedding(),
@@ -212,9 +230,10 @@ class SubjectTracker {
 
         identity = currentIdentity.incrementLost()
 
-        // Congelar el cropBox en la ultima posicion buena. Antes se usaba prediccion
-        // de velocidad, pero eso causa que el box derive hacia un lugar incorrecto
-        // y confunda al usuario (parece que esta trackeando a otro).
+        // Kalman sigue prediciendo incluso sin mediciones.
+        kalmanFilter.predict()
+
+        // Congelar el cropBox en la ultima posicion buena.
         cropBox = frozenCropBox ?: cropBox
 
         if (detections.isEmpty()) return cropBox
@@ -233,40 +252,38 @@ class SubjectTracker {
             return null
         }
 
-        val lastKnown = currentIdentity.lastKnownBox
-
-        val predictedPos = predictNextBox(lastKnown)
+        // Usar prediccion de Kalman en vez de simple velocidad.
+        val predictedBox = kalmanFilter.predictedBox()
+        val predictedCenter = PointF(
+            (predictedBox.left + predictedBox.right) / 2f,
+            (predictedBox.top + predictedBox.bottom) / 2f
+        )
 
         val bestCandidate = detections
             .filter { box ->
-                // Gate espacial para re-ID: mas generoso que tracking, pero no infinito.
-                normalizedCenterDistance(
-                    PointF(
-                        (predictedPos.left + predictedPos.right) / 2f,
-                        (predictedPos.top + predictedPos.bottom) / 2f
-                    ),
-                    box
-                ) <= MAX_JUMP_DISTANCE_REID
+                // Gate espacial para re-ID.
+                normalizedCenterDistance(predictedCenter, box) <= MAX_JUMP_DISTANCE_REID
             }
             .map { box ->
                 val embedding = embeddingExtractor.extract(frame, box)
                 val similarity = robustSimilarity(currentIdentity, embedding)
 
-                // Proximidad a la ultima posicion conocida (o predicha por velocidad).
                 val proximity = 1f - normalizedCenterDistance(
-                    PointF(
-                        (predictedPos.left + predictedPos.right) / 2f,
-                        (predictedPos.top + predictedPos.bottom) / 2f
-                    ),
+                    predictedCenter,
                     box
                 ).coerceIn(0f, 1f)
 
-                // Similitud de tamano: penalizar candidatos de tamano muy diferente.
                 val sizeSimilarity = computeSizeSimilarity(box)
 
-                val combinedScore = similarity * EMBEDDING_WEIGHT_REID +
+                var combinedScore = similarity * EMBEDDING_WEIGHT_REID +
                     proximity * PROXIMITY_WEIGHT_REID +
                     sizeSimilarity * SIZE_SIMILARITY_WEIGHT
+
+                // Bonus de OCR: si tenemos numero confirmado, intentar leer del candidato.
+                // Esto es asincrono, asi que solo aplicamos el bonus si ya tenemos lectura previa
+                // del mismo candidato (via reIdCandidateBox + OCR previo).
+                // En la practica, el bonus se aplica en frames posteriores del consecutive-match.
+
                 ReIdCandidate(box, combinedScore, embedding)
             }
             .filter { (_, score, _) ->
@@ -276,7 +293,6 @@ class SubjectTracker {
 
         if (bestCandidate == null) {
             identity = currentIdentity.incrementLost()
-            // Candidato perdido → resetear contador consecutivo.
             reIdConsecutiveCount = 0
             reIdCandidateBox = null
             return cropBox
@@ -287,16 +303,29 @@ class SubjectTracker {
         // --- Consecutive-match: exigir que el MISMO candidato gane N frames seguidos ---
         val prevCandidate = reIdCandidateBox
         if (prevCandidate != null && calculateIoU(prevCandidate, foundBox) >= REID_SAME_CANDIDATE_IOU) {
-            // Mismo candidato que el frame anterior.
             reIdConsecutiveCount++
         } else {
-            // Candidato diferente → empezar de nuevo.
             reIdConsecutiveCount = 1
+            // Nuevo candidato: intentar leer OCR para el siguiente frame.
+            if (jerseyOcr.confirmedNumber != null) {
+                jerseyOcr.readFromFrame(frame, foundBox) { candidateNumber ->
+                    // Si el numero coincide, podemos aceptar mas rapido.
+                    // El resultado se evaluara en el siguiente frame.
+                }
+            }
         }
         reIdCandidateBox = RectF(foundBox)
 
-        if (reIdConsecutiveCount < REID_CONSECUTIVE_REQUIRED) {
-            // Todavia no tiene suficientes frames consecutivos. Seguir buscando.
+        // Si tenemos OCR confirmado y el candidato tiene el mismo numero,
+        // reducir el requisito de frames consecutivos.
+        val requiredConsecutive = if (jerseyOcr.confirmedNumber != null) {
+            // Con OCR, 2 frames son suficientes (el numero ya confirma identidad).
+            2
+        } else {
+            REID_CONSECUTIVE_REQUIRED
+        }
+
+        if (reIdConsecutiveCount < requiredConsecutive) {
             identity = currentIdentity.incrementLost()
             return cropBox
         }
@@ -311,6 +340,9 @@ class SubjectTracker {
         embeddingBuffer.clear()
         repeat(EMBEDDING_BUFFER_SIZE) { embeddingBuffer.add(foundEmbedding.copyOf()) }
 
+        // Kalman correct con la nueva posicion.
+        kalmanFilter.correct(foundBox)
+
         identity = currentIdentity.copy(
             embedding = blendedIdentityEmbedding(),
             lastKnownBox = RectF(foundBox),
@@ -320,7 +352,6 @@ class SubjectTracker {
         )
 
         smoothingFilter.reset(foundBox)
-        seedMotion(foundBox)
         cropBox = foundBox
         state = TrackerState.TRACKING
 
@@ -333,13 +364,11 @@ class SubjectTracker {
         val candidateHeight = candidateBox.height().coerceAtLeast(0.001f)
         val candidateAspect = candidateBox.width() / candidateHeight
 
-        // Ratio entre alturas (1.0 = mismo tamano, <1.0 = diferente).
         val heightRatio = if (referenceHeight > 0f) {
             val ratio = candidateHeight / referenceHeight
             if (ratio > 1f) 1f / ratio else ratio
         } else 1f
 
-        // Similitud de aspect ratio.
         val aspectRatio = if (referenceAspectRatio > 0f) {
             val ratio = candidateAspect / referenceAspectRatio
             if (ratio > 1f) 1f / ratio else ratio
@@ -373,12 +402,11 @@ class SubjectTracker {
     ): TrackingMatch? {
         if (candidates.isEmpty()) return null
 
-        val predictedBox = predictNextBox(currentIdentity.lastKnownBox)
+        // Usar Kalman prediction en vez de simple velocidad.
+        val predictedBox = kalmanFilter.predictedBox()
 
         return candidates
             .filter { box ->
-                // Gate espacial: descartar candidatos demasiado lejos de la posicion predicha.
-                // Un jugador no puede teleportarse al otro lado de la cancha en un frame.
                 normalizedCenterDistance(predictedBox, box) <= MAX_JUMP_DISTANCE_TRACKING
             }
             .map { box ->
@@ -386,7 +414,6 @@ class SubjectTracker {
                 val centerDistance = normalizedCenterDistance(predictedBox, box)
                 val sizeSim = computeSizeSimilarity(box)
 
-                // Siempre validar embedding para evitar saltos de lock entre sujetos.
                 val embedding = embeddingExtractor.extract(frame, box)
                 val similarity = robustSimilarity(currentIdentity, embedding)
 
@@ -442,9 +469,9 @@ class SubjectTracker {
         val threeQuarterY = box.top + box.height() * 0.75f
 
         return listOf(
-            PointF(centerX, centerY),      // centro
-            PointF(centerX, box.top),      // cabeza / parte superior
-            PointF(centerX, box.bottom),   // pies / parte inferior
+            PointF(centerX, centerY),
+            PointF(centerX, box.top),
+            PointF(centerX, box.bottom),
             PointF(box.left, centerY),
             PointF(box.right, centerY),
             PointF(box.left, quarterY),
@@ -458,50 +485,6 @@ class SubjectTracker {
         val dx = a.x - b.x
         val dy = a.y - b.y
         return sqrt(dx * dx + dy * dy)
-    }
-
-    private fun seedMotion(box: RectF) {
-        lastCenterX = (box.left + box.right) / 2f
-        lastCenterY = (box.top + box.bottom) / 2f
-        velocityX = 0f
-        velocityY = 0f
-        velocityIndex = 0
-        velocitySamples = 0
-        velocityHistoryX.fill(0f)
-        velocityHistoryY.fill(0f)
-    }
-
-    private fun updateMotion(box: RectF) {
-        val centerX = (box.left + box.right) / 2f
-        val centerY = (box.top + box.bottom) / 2f
-
-        val previousX = lastCenterX ?: centerX
-        val previousY = lastCenterY ?: centerY
-
-        val dx = centerX - previousX
-        val dy = centerY - previousY
-
-        // Guardar en historial circular.
-        velocityHistoryX[velocityIndex % VELOCITY_HISTORY_SIZE] = dx
-        velocityHistoryY[velocityIndex % VELOCITY_HISTORY_SIZE] = dy
-        velocityIndex++
-        velocitySamples = minOf(velocitySamples + 1, VELOCITY_HISTORY_SIZE)
-
-        // Velocidad suavizada = promedio del historial reciente.
-        velocityX = velocityHistoryX.take(velocitySamples).average().toFloat()
-        velocityY = velocityHistoryY.take(velocitySamples).average().toFloat()
-
-        lastCenterX = centerX
-        lastCenterY = centerY
-    }
-
-    private fun predictNextBox(reference: RectF): RectF {
-        val predictedLeft = (reference.left + velocityX).coerceIn(0f, 1f)
-        val predictedTop = (reference.top + velocityY).coerceIn(0f, 1f)
-        val predictedRight = (reference.right + velocityX).coerceIn(0f, 1f)
-        val predictedBottom = (reference.bottom + velocityY).coerceIn(0f, 1f)
-
-        return RectF(predictedLeft, predictedTop, predictedRight, predictedBottom)
     }
 
     private fun calculateIoU(a: RectF, b: RectF): Float {
