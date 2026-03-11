@@ -25,8 +25,8 @@ class SubjectIdentity(
     val framesLost: Int = 0
 ) {
     companion object {
-        const val SIMILARITY_THRESHOLD = 0.82f
-        const val MAX_FRAMES_LOST = 300
+        const val SIMILARITY_THRESHOLD = 0.88f
+        const val MAX_FRAMES_LOST = 150
         const val PATCH_WIDTH = 64
         const val PATCH_HEIGHT = 128
 

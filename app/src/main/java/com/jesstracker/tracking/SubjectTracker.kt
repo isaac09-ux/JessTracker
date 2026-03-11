@@ -26,15 +26,22 @@ class SubjectTracker {
 
         // Peso del aspect ratio en el score de re-identificacion.
         private const val SIZE_SIMILARITY_WEIGHT = 0.12f
-        private const val EMBEDDING_WEIGHT_TRACKING = 0.82f
-        private const val PROXIMITY_WEIGHT_TRACKING = 0.18f
-        private const val EMBEDDING_WEIGHT_REID = 0.72f
-        private const val PROXIMITY_WEIGHT_REID = 0.16f
+
+        // En voley, las camisetas son iguales → proximidad importa MAS que embedding.
+        private const val EMBEDDING_WEIGHT_TRACKING = 0.55f
+        private const val PROXIMITY_WEIGHT_TRACKING = 0.40f
+        private const val EMBEDDING_WEIGHT_REID = 0.50f
+        private const val PROXIMITY_WEIGHT_REID = 0.35f
 
         // Umbral de IoU para modular la penalizacion por proximidad en tracking continuo.
         private const val IOU_FAST_MATCH_THRESHOLD = 0.35f
         // Score minimo para aceptar un candidato en tracking continuo.
-        private const val TRACKING_MATCH_THRESHOLD = 0.52f
+        private const val TRACKING_MATCH_THRESHOLD = 0.58f
+
+        // Distancia maxima (normalizada) que un candidato puede estar de la posicion
+        // predicha para ser considerado. Evita saltos al otro lado de la cancha.
+        private const val MAX_JUMP_DISTANCE_TRACKING = 0.18f
+        private const val MAX_JUMP_DISTANCE_REID = 0.30f
 
         // Cuantos frames de velocidad reciente guardar para prediccion suavizada.
         private const val VELOCITY_HISTORY_SIZE = 5
@@ -207,13 +214,24 @@ class SubjectTracker {
 
         val lastKnown = currentIdentity.lastKnownBox
 
+        val predictedPos = predictNextBox(lastKnown)
+
         val bestCandidate = detections
+            .filter { box ->
+                // Gate espacial para re-ID: mas generoso que tracking, pero no infinito.
+                normalizedCenterDistance(
+                    PointF(
+                        (predictedPos.left + predictedPos.right) / 2f,
+                        (predictedPos.top + predictedPos.bottom) / 2f
+                    ),
+                    box
+                ) <= MAX_JUMP_DISTANCE_REID
+            }
             .map { box ->
                 val embedding = embeddingExtractor.extract(frame, box)
                 val similarity = robustSimilarity(currentIdentity, embedding)
 
                 // Proximidad a la ultima posicion conocida (o predicha por velocidad).
-                val predictedPos = predictNextBox(lastKnown)
                 val proximity = 1f - normalizedCenterDistance(
                     PointF(
                         (predictedPos.left + predictedPos.right) / 2f,
@@ -314,6 +332,11 @@ class SubjectTracker {
         val predictedBox = predictNextBox(currentIdentity.lastKnownBox)
 
         return candidates
+            .filter { box ->
+                // Gate espacial: descartar candidatos demasiado lejos de la posicion predicha.
+                // Un jugador no puede teleportarse al otro lado de la cancha en un frame.
+                normalizedCenterDistance(predictedBox, box) <= MAX_JUMP_DISTANCE_TRACKING
+            }
             .map { box ->
                 val iou = calculateIoU(predictedBox, box)
                 val centerDistance = normalizedCenterDistance(predictedBox, box)

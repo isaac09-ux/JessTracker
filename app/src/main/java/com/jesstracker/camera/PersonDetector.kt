@@ -26,20 +26,16 @@ class PersonDetector(private val context: Context) {
     companion object {
         private const val TAG = "PersonDetector"
         private const val MODEL_NAME = "efficientdet_lite0.tflite"
-        private const val MIN_CONFIDENCE = 0.28f
-        private const val MAX_RESULTS = 20
+        private const val MIN_CONFIDENCE = 0.40f
+        private const val MAX_RESULTS = 12
 
-        // Permite detectar jugadores/objetos lejanos (gradas / fondo de cancha).
-        private const val MIN_NORMALIZED_HEIGHT = 0.012f
-        private const val MIN_NORMALIZED_WIDTH = 0.004f
+        // Permite detectar jugadores lejanos (fondo de cancha).
+        private const val MIN_NORMALIZED_HEIGHT = 0.020f
+        private const val MIN_NORMALIZED_WIDTH = 0.008f
 
+        // Solo personas — evita locks accidentales en objetos (red, postes, bancas).
         private val TRACKABLE_LABELS = setOf(
-            "person",
-            "car",
-            "truck",
-            "bus",
-            "motorcycle",
-            "bicycle"
+            "person"
         )
     }
 
