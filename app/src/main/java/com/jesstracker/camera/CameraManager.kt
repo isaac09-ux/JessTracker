@@ -59,8 +59,9 @@ class CameraManager(
         private const val LANDSCAPE_TARGET_SUBJECT_HEIGHT = 0.52f
         private const val MIN_ZOOM = 1.0f
         private const val MAX_ZOOM = 4.0f
-        private const val BASE_ZOOM_SMOOTHING = 0.34f
-        private const val ZOOM_RESET_SMOOTHING = 0.15f
+        // Smoothing mas bajo = transiciones mas suaves tipo Samsung.
+        private const val BASE_ZOOM_SMOOTHING = 0.12f
+        private const val ZOOM_RESET_SMOOTHING = 0.06f
 
         // Umbrales para adaptar framing segun movimiento real del dispositivo.
         private const val LOW_HAND_MOTION = 0.18f
@@ -278,9 +279,10 @@ class CameraManager(
         viewWidth: Int,
         viewHeight: Int
     ) {
+        // --- Tracking activo: zoom enfocado SOLO en la jugadora seleccionada ---
         if (state == TrackerState.TRACKING && trackedBox != null) {
             val isLandscape = viewWidth > viewHeight
-            val baseTargetSubjectSize = if (isLandscape) {
+            val targetSubjectSize = if (isLandscape) {
                 LANDSCAPE_TARGET_SUBJECT_HEIGHT
             } else {
                 PORTRAIT_TARGET_SUBJECT_HEIGHT
@@ -289,47 +291,42 @@ class CameraManager(
             val subjectHeight = (trackedBox.bottom - trackedBox.top).coerceAtLeast(0.01f)
             val centerX = (trackedBox.left + trackedBox.right) * 0.5f
             val centerY = (trackedBox.top + trackedBox.bottom) * 0.5f
+
+            // Unica compensacion: si la jugadora esta muy al borde, zoom out suave
+            // para no cortarla. NO compensar crowd ni contexto — el zoom es SOLO para ella.
             val distanceToNearestEdge = minOf(centerX, 1f - centerX, centerY, 1f - centerY)
-            val contextSpread = estimateContextSpread(detections)
+            val edgeCompensation = if (distanceToNearestEdge < 0.12f) 0.92f else 1f
 
-            val edgeCompensation = if (distanceToNearestEdge < 0.16f) 0.88f else 1f
-            val crowdCompensation = when {
-                detections.size >= 12 -> 1.18f
-                detections.size >= 8 -> 1.12f
-                detections.size >= 5 -> 1.06f
-                else -> 1f
-            }
-            val contextCompensation = 1f + (contextSpread * 0.06f)
+            val targetZoom = (targetSubjectSize * edgeCompensation / subjectHeight)
+                .coerceIn(MIN_ZOOM, MAX_ZOOM)
 
-            val adaptiveTargetSubjectSize = (
-                baseTargetSubjectSize * crowdCompensation * edgeCompensation * contextCompensation
-            ).coerceIn(0.44f, 0.76f)
-
-            val targetZoom = (adaptiveTargetSubjectSize / subjectHeight).coerceIn(MIN_ZOOM, MAX_ZOOM)
-
+            // Smoothing adaptativo al movimiento de mano, pero mas suave que antes.
             val handMotion = deviceMotionEstimator.angularSpeed()
             val motionFactor = when {
-                handMotion <= LOW_HAND_MOTION -> 1.12f
-                handMotion >= HIGH_HAND_MOTION -> 0.55f
-                else -> 1.12f - ((handMotion - LOW_HAND_MOTION) / (HIGH_HAND_MOTION - LOW_HAND_MOTION)) * 0.57f
+                handMotion <= LOW_HAND_MOTION -> 1.0f
+                handMotion >= HIGH_HAND_MOTION -> 0.5f
+                else -> 1.0f - ((handMotion - LOW_HAND_MOTION) / (HIGH_HAND_MOTION - LOW_HAND_MOTION)) * 0.5f
             }
 
-            val adaptiveSmoothing = (BASE_ZOOM_SMOOTHING * motionFactor).coerceIn(0.18f, 0.42f)
+            val adaptiveSmoothing = (BASE_ZOOM_SMOOTHING * motionFactor).coerceIn(0.04f, 0.16f)
             val smoothedZoom = currentZoomRatio + (targetZoom - currentZoomRatio) * adaptiveSmoothing
             applyZoom(smoothedZoom)
             updateMeteringPoint(centerX, centerY, handMotion)
             return
         }
 
+        // --- LOST o RE_IDENTIFYING: mantener el zoom actual ---
+        // No hacer zoom-out cuando pierde al sujeto temporalmente.
+        // Esto da una experiencia tipo Samsung donde el encuadre se mantiene estable
+        // incluso si el tracker la pierde por 1-2 segundos.
+        if (state == TrackerState.LOST || state == TrackerState.RE_IDENTIFYING) {
+            // Mantener el metering en el ultimo punto conocido.
+            return
+        }
+
+        // --- IDLE: zoom-out suave al nivel base ---
         val relaxedZoom = currentZoomRatio + (MIN_ZOOM - currentZoomRatio) * ZOOM_RESET_SMOOTHING
         applyZoom(relaxedZoom)
-    }
-
-    private fun estimateContextSpread(detections: List<RectF>): Float {
-        if (detections.size <= 1) return 0f
-        val minLeft = detections.minOf { it.left }
-        val maxRight = detections.maxOf { it.right }
-        return (maxRight - minLeft).coerceIn(0f, 1f)
     }
 
     private fun updateMeteringPoint(centerX: Float, centerY: Float, handMotion: Float) {

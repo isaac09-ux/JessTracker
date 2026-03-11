@@ -48,6 +48,12 @@ class TrackingOverlay @JvmOverloads constructor(
     private var confidence: Float = 0f
     private var detectionCount: Int = 0
 
+    // Detecciones crudas para mostrar en IDLE (el usuario ve a quien puede tocar).
+    private var idleDetections: List<RectF> = emptyList()
+
+    // Numero de camiseta detectado por OCR.
+    private var jerseyNumber: Int? = null
+
     private var tapX: Float = 0f
     private var tapY: Float = 0f
     private var tapAlpha: Int = 0
@@ -115,6 +121,19 @@ class TrackingOverlay @JvmOverloads constructor(
         setShadowLayer(2f, 0f, 1f, Color.BLACK)
     }
 
+    // Paint para marcadores de personas detectadas en IDLE.
+    private val idleDetectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#60FFFFFF")
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f
+        pathEffect = DashPathEffect(floatArrayOf(6f, 6f), 0f)
+    }
+
+    private val idleDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#AAFFFFFF")
+        style = Paint.Style.FILL
+    }
+
     fun update(state: TrackerState, cropBox: RectF?) {
         trackerState = state
         subjectBox = cropBox?.let { denormalize(it) }
@@ -133,6 +152,16 @@ class TrackingOverlay @JvmOverloads constructor(
     fun updateStatusInfo(confidence: Float, detectionCount: Int) {
         this.confidence = confidence
         this.detectionCount = detectionCount
+    }
+
+    /** Pasar las detecciones crudas para que se dibujen como marcadores en IDLE. */
+    fun updateDetections(detections: List<RectF>) {
+        idleDetections = detections
+    }
+
+    /** Actualizar el numero de camiseta leido por OCR. */
+    fun updateJerseyNumber(number: Int?) {
+        jerseyNumber = number
     }
 
     fun showTapFeedback(x: Float, y: Float) {
@@ -162,17 +191,35 @@ class TrackingOverlay @JvmOverloads constructor(
         drawTapFeedback(canvas)
         drawStatusIndicator(canvas)
 
+        // En IDLE, mostrar todas las personas detectadas como marcadores sutiles.
+        if (trackerState == TrackerState.IDLE) {
+            drawIdleDetections(canvas)
+            return
+        }
+
         val box = subjectBox ?: return
 
         when (trackerState) {
             TrackerState.IDLE -> return
             TrackerState.TRACKING -> {
-                fillPaint.color = Color.parseColor("#2000FF88")
+                // Color del borde segun confianza: verde brillante (>80%), amarillo (<80%).
+                val trackColor = if (confidence >= 0.80f) {
+                    Color.parseColor("#00FF88")
+                } else if (confidence >= 0.60f) {
+                    Color.parseColor("#AAFF44")
+                } else {
+                    Color.parseColor("#FFD700")
+                }
+                trackingPaint.color = trackColor
+                fillPaint.color = Color.argb(0x20,
+                    Color.red(trackColor), Color.green(trackColor), Color.blue(trackColor))
                 canvas.drawRoundRect(box, 8f, 8f, fillPaint)
                 canvas.drawRoundRect(box, 8f, 8f, trackingPaint)
                 drawCornerAccents(canvas, box, trackingPaint)
                 drawCropGuide(canvas)
-                drawStateLabel(canvas, box, "TRACKING", Color.parseColor("#00FF88"))
+                val pct = (confidence * 100).toInt()
+                val numberTag = jerseyNumber?.let { " #$it" } ?: ""
+                drawStateLabel(canvas, box, "LOCK $pct%$numberTag", trackColor)
             }
 
             TrackerState.LOST -> {
@@ -205,7 +252,8 @@ class TrackingOverlay @JvmOverloads constructor(
             TrackerState.TRACKING -> {
                 dotColor = Color.parseColor("#00FF88")
                 val pct = (confidence * 100).toInt()
-                statusText = "LOCK $pct%"
+                val numberTag = jerseyNumber?.let { " #$it" } ?: ""
+                statusText = "LOCK $pct%$numberTag"
             }
             TrackerState.LOST -> {
                 dotColor = Color.parseColor("#FFD700")
@@ -367,6 +415,18 @@ class TrackingOverlay @JvmOverloads constructor(
         if (tapAlpha > 0) {
             invalidate()
             postDelayed({ fadeTap() }, 30)
+        }
+    }
+
+    private fun drawIdleDetections(canvas: Canvas) {
+        for (det in idleDetections) {
+            val box = denormalize(det)
+            // Rectangulo sutil con esquinas redondeadas.
+            canvas.drawRoundRect(box, 6f, 6f, idleDetectionPaint)
+            // Punto en el centro para que se vea donde tocar.
+            val cx = (box.left + box.right) / 2f
+            val cy = (box.top + box.bottom) / 2f
+            canvas.drawCircle(cx, cy, 5f, idleDotPaint)
         }
     }
 

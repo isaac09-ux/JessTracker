@@ -5,18 +5,28 @@ import android.graphics.Color
 import android.graphics.RectF
 
 /**
- * EmbeddingExtractor — convierte un recorte de imagen en un vector de 96 numeros.
+ * EmbeddingExtractor — convierte un recorte de imagen en un vector numerico.
  *
  * Pipeline:
  *   1) Crop de la jugadora detectada.
  *   2) Segmentacion rapida de silueta (foreground mask) para quitar fondo.
  *   3) Histograma HSV por zonas del cuerpo.
+ *
+ * Mejora v2: Usa Hue + Value (brillo) con 4 zonas verticales.
+ * Esto permite distinguir jugadoras con la misma camiseta pero diferente
+ * tono de piel, color de pelo, tipo de shorts, etc.
+ *
+ * Dimensiones: (HUE_BINS + VALUE_BINS) * NUM_ZONES = (24 + 16) * 4 = 160
  */
 class EmbeddingExtractor {
 
     companion object {
-        private const val BINS_PER_ZONE = 32
-        const val TOTAL_BINS = 96
+        private const val HUE_BINS = 24
+        private const val VALUE_BINS = 16
+        private const val BINS_PER_ZONE = HUE_BINS + VALUE_BINS
+        private const val NUM_ZONES = 4
+        const val TOTAL_BINS = BINS_PER_ZONE * NUM_ZONES  // 160
+
         private const val HUE_RANGE = 360f
         private const val SATURATION_THRESHOLD = 0.12f
         private const val VALUE_THRESHOLD = 0.12f
@@ -39,11 +49,11 @@ class EmbeddingExtractor {
         try {
             val foregroundMask = buildForegroundMask(resized)
             val embedding = FloatArray(TOTAL_BINS)
-            val zoneHeight = resized.height / 3
+            val zoneHeight = resized.height / NUM_ZONES
             val hsv = FloatArray(3)
 
             for (y in 0 until resized.height) {
-                val zone = minOf(y / zoneHeight, 2)
+                val zone = minOf(y / zoneHeight, NUM_ZONES - 1)
                 val zoneOffset = zone * BINS_PER_ZONE
 
                 for (x in 0 until resized.width) {
@@ -54,12 +64,20 @@ class EmbeddingExtractor {
 
                     val hue = hsv[0]
                     val saturation = hsv[1]
+                    val value = hsv[2]
 
+                    // Canal Hue: solo si hay suficiente saturacion (evita grises/blancos).
                     if (saturation > SATURATION_THRESHOLD) {
-                        val bin = (hue / HUE_RANGE * BINS_PER_ZONE).toInt()
-                            .coerceIn(0, BINS_PER_ZONE - 1)
-                        embedding[zoneOffset + bin]++
+                        val hueBin = (hue / HUE_RANGE * HUE_BINS).toInt()
+                            .coerceIn(0, HUE_BINS - 1)
+                        embedding[zoneOffset + hueBin]++
                     }
+
+                    // Canal Value (brillo): siempre contribuye.
+                    // Distingue piel clara vs oscura, pelo negro vs rubio, etc.
+                    val valueBin = (value * VALUE_BINS).toInt()
+                        .coerceIn(0, VALUE_BINS - 1)
+                    embedding[zoneOffset + HUE_BINS + valueBin]++
                 }
             }
 
